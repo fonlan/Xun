@@ -1,12 +1,15 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fs::{create_dir_all, read_to_string, write};
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use parking_lot::Mutex;
 use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor, winit};
@@ -29,9 +32,164 @@ const QUERY_DEBOUNCE_THREE_TO_FOUR_CHARS_MS: u64 = 90;
 const QUERY_DEBOUNCE_LONG_QUERY_MS: u64 = 60;
 const RESULT_ICON_SIZE_PX: u32 = 24;
 const MAX_RESULT_ICON_CACHE: usize = 4096;
+const OPENED_ITEM_HISTORY_FILE_NAME: &str = "opened-items.v1";
+const MAX_OPENED_ITEM_HISTORY: usize = 2048;
 
 thread_local! {
     static RESULT_ICON_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Clone)]
+struct OpenedItemRecord {
+    path: String,
+    last_opened_ms: u128,
+}
+
+#[derive(Default)]
+struct OpenedItemHistory {
+    records: HashMap<String, OpenedItemRecord>,
+}
+
+impl OpenedItemHistory {
+    fn load() -> Self {
+        match Self::try_load() {
+            Ok(history) => history,
+            Err(err) => {
+                xlog::warn(format!("load opened item history failed: {err:#}"));
+                Self::default()
+            }
+        }
+    }
+
+    fn open_rank(&self, path: &str) -> u128 {
+        let key = normalize_opened_item_key(path);
+        self.records
+            .get(key.as_str())
+            .map(|record| record.last_opened_ms)
+            .unwrap_or(0)
+    }
+
+    fn record_open(&mut self, path: &str) -> Result<()> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        let key = normalize_opened_item_key(trimmed);
+        self.records.insert(
+            key,
+            OpenedItemRecord {
+                path: trimmed.to_string(),
+                last_opened_ms: now_unix_millis(),
+            },
+        );
+        self.persist()
+    }
+
+    fn try_load() -> Result<Self> {
+        let path = opened_item_history_path();
+        let content = match read_to_string(path.as_path()) {
+            Ok(content) => content,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("read opened item history failed: {}", path.display())
+                });
+            }
+        };
+
+        let mut records: HashMap<String, OpenedItemRecord> = HashMap::new();
+        for (line_index, raw_line) in content.lines().enumerate() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let Some((timestamp_text, item_path)) = line.split_once('|') else {
+                xlog::warn(format!(
+                    "ignore malformed opened item history line {}",
+                    line_index + 1
+                ));
+                continue;
+            };
+
+            let Ok(last_opened_ms) = timestamp_text.trim().parse::<u128>() else {
+                xlog::warn(format!(
+                    "ignore opened item history line {} due to invalid timestamp",
+                    line_index + 1
+                ));
+                continue;
+            };
+
+            let item_path = item_path.trim();
+            if item_path.is_empty() {
+                continue;
+            }
+
+            let key = normalize_opened_item_key(item_path);
+            match records.get(&key) {
+                Some(existing) if existing.last_opened_ms >= last_opened_ms => {}
+                _ => {
+                    records.insert(
+                        key,
+                        OpenedItemRecord {
+                            path: item_path.to_string(),
+                            last_opened_ms,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut history = Self { records };
+        history.trim_to_limit();
+        Ok(history)
+    }
+
+    fn persist(&mut self) -> Result<()> {
+        self.trim_to_limit();
+
+        let path = opened_item_history_path();
+        if let Some(parent) = path.parent() {
+            create_dir_all(parent)
+                .with_context(|| format!("create config dir failed: {}", parent.display()))?;
+        }
+
+        let mut records = self.records.values().cloned().collect::<Vec<_>>();
+        records.sort_by(|left, right| right.last_opened_ms.cmp(&left.last_opened_ms));
+
+        let mut serialized = String::new();
+        for record in records {
+            serialized.push_str(record.last_opened_ms.to_string().as_str());
+            serialized.push('|');
+            serialized.push_str(record.path.as_str());
+            serialized.push('\n');
+        }
+
+        write(path.as_path(), serialized)
+            .with_context(|| format!("write opened item history failed: {}", path.display()))
+    }
+
+    fn trim_to_limit(&mut self) {
+        if self.records.len() <= MAX_OPENED_ITEM_HISTORY {
+            return;
+        }
+
+        let mut records = self
+            .records
+            .drain()
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        records.sort_by(|left, right| right.last_opened_ms.cmp(&left.last_opened_ms));
+        records.truncate(MAX_OPENED_ITEM_HISTORY);
+
+        for record in records {
+            self.records
+                .insert(normalize_opened_item_key(record.path.as_str()), record);
+        }
+    }
 }
 
 pub struct XunApp {
@@ -50,12 +208,14 @@ impl XunApp {
         let result_paths = Arc::new(Mutex::new(Vec::<String>::new()));
         let all_results = Arc::new(Mutex::new(Vec::<SearchResult>::new()));
         let last_dispatched_query = Arc::new(Mutex::new(None::<String>));
+        let opened_item_history = Arc::new(Mutex::new(OpenedItemHistory::load()));
 
         let weak_for_worker = ui.as_weak();
         let ipc_client_for_worker = ipc_client.clone();
         let seq_for_worker = query_seq.clone();
         let result_paths_for_worker = result_paths.clone();
         let all_results_for_worker = all_results.clone();
+        let opened_item_history_for_worker = opened_item_history.clone();
         thread::Builder::new()
             .name("xun-query-worker".to_string())
             .spawn(move || {
@@ -131,6 +291,7 @@ impl XunApp {
                     let seq_guard = seq_for_worker.clone();
                     let result_paths_for_apply = result_paths_for_worker.clone();
                     let all_results_for_apply = all_results_for_worker.clone();
+                    let opened_item_history_for_apply = opened_item_history_for_worker.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         if seq_guard.load(Ordering::Acquire) != seq {
                             xlog::info(format!(
@@ -161,6 +322,7 @@ impl XunApp {
                             &guard,
                             selected_filter,
                             &result_paths_for_apply,
+                            &opened_item_history_for_apply,
                         );
                         xlog::info(format!(
                             "set_results applied seq={} total={} shown={} filter={}",
@@ -227,6 +389,7 @@ impl XunApp {
         let weak = ui.as_weak();
         let all_results_for_filter = all_results.clone();
         let result_paths_for_filter = result_paths.clone();
+        let opened_item_history_for_filter = opened_item_history.clone();
         ui.on_filter_selected(move |index| {
             let Some(window) = weak.upgrade() else {
                 return;
@@ -242,6 +405,7 @@ impl XunApp {
                 &guard,
                 selected_filter,
                 &result_paths_for_filter,
+                &opened_item_history_for_filter,
             );
 
             xlog::info(format!(
@@ -255,6 +419,7 @@ impl XunApp {
 
         let weak = ui.as_weak();
         let result_paths_for_submit = result_paths.clone();
+        let opened_item_history_for_submit = opened_item_history.clone();
         ui.on_submit(move |text| {
             let text = text.to_string();
             let Some(window) = weak.upgrade() else {
@@ -272,7 +437,14 @@ impl XunApp {
                         "submit selected result index={} path={}",
                         selected, path
                     ));
-                    let _ = execute_or_open(&path);
+                    if let Err(err) = execute_or_open(&path) {
+                        xlog::warn(format!(
+                            "submit selected execute_or_open failed path={}: {err:#}",
+                            path
+                        ));
+                    } else {
+                        record_opened_item(&opened_item_history_for_submit, path.as_str());
+                    }
                     let _ = window.hide();
                     xlog::info("window hidden after selected submit");
                     return;
@@ -285,15 +457,30 @@ impl XunApp {
             }
 
             xlog::info(format!("submit input={:?}", text));
-            let _ = execute_or_open(&text);
+            if let Err(err) = execute_or_open(&text) {
+                xlog::warn(format!(
+                    "submit execute_or_open failed input={:?}: {err:#}",
+                    text
+                ));
+            } else {
+                record_opened_item(&opened_item_history_for_submit, text.as_str());
+            }
             let _ = window.hide();
             xlog::info("window hidden after submit");
         });
 
         let weak = ui.as_weak();
+        let opened_item_history_for_activate = opened_item_history.clone();
         ui.on_item_activated(move |path| {
             xlog::info(format!("item_activated path={}", path));
-            let _ = execute_or_open(path.as_str());
+            if let Err(err) = execute_or_open(path.as_str()) {
+                xlog::warn(format!(
+                    "item_activated execute_or_open failed path={}: {err:#}",
+                    path
+                ));
+            } else {
+                record_opened_item(&opened_item_history_for_activate, path.as_str());
+            }
             if let Some(window) = weak.upgrade() {
                 let _ = window.hide();
                 xlog::info("window hidden after item activation");
@@ -453,6 +640,7 @@ impl XunApp {
                     all_results_for_activate.lock().clear();
                     clear_result_icon_cache();
 
+                    let previous_initial_index_ready = window.get_initial_index_ready();
                     match ipc_client_for_activate.check_initial_index_ready_quick() {
                         Ok(initial_index_ready) => {
                             window.set_service_unavailable(false);
@@ -462,11 +650,19 @@ impl XunApp {
                             ));
                         }
                         Err(err) => {
-                            window.set_service_unavailable(true);
-                            window.set_initial_index_ready(false);
-                            xlog::warn(format!(
-                                "activate status refresh failed, mark service unavailable: {err:#}"
-                            ));
+                            let service_unavailable = is_service_unavailable_error(&err);
+                            window.set_service_unavailable(service_unavailable);
+                            if service_unavailable {
+                                window.set_initial_index_ready(false);
+                                xlog::warn(format!(
+                                    "activate status refresh failed, mark service unavailable: {err:#}"
+                                ));
+                            } else {
+                                window.set_initial_index_ready(previous_initial_index_ready);
+                                xlog::warn(format!(
+                                    "activate status refresh failed but service seems available, keep previous initial_index_ready={previous_initial_index_ready}: {err:#}"
+                                ));
+                            }
                         }
                     }
 
@@ -492,9 +688,13 @@ impl XunApp {
                 ui.set_service_unavailable(false);
                 ui.set_initial_index_ready(initial_index_ready);
             }
-            Err(_) => {
-                ui.set_service_unavailable(true);
+            Err(err) => {
+                let service_unavailable = is_service_unavailable_error(&err);
+                ui.set_service_unavailable(service_unavailable);
                 ui.set_initial_index_ready(false);
+                xlog::warn(format!(
+                    "startup status refresh failed service_unavailable={service_unavailable}: {err:#}"
+                ));
             }
         }
         center_popup_window(&ui);
@@ -519,13 +719,25 @@ fn apply_results_for_filter(
     all_results: &[SearchResult],
     selected_filter: FileTypeFilter,
     result_paths: &Arc<Mutex<Vec<String>>>,
+    opened_item_history: &Arc<Mutex<OpenedItemHistory>>,
 ) -> usize {
     window.set_total_match_count(all_results.len() as i32);
 
-    let filtered = all_results
-        .iter()
-        .filter(|item| selected_filter.matches_kind(item.kind.as_str()))
-        .map(|item| ResultRow {
+    let mut filtered = {
+        let history = opened_item_history.lock();
+        all_results
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| selected_filter.matches_kind(item.kind.as_str()))
+            .map(|(source_index, item)| (history.open_rank(item.path.as_str()), source_index, item))
+            .collect::<Vec<_>>()
+    };
+
+    filtered.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+    let filtered = filtered
+        .into_iter()
+        .map(|(_, _, item)| ResultRow {
             icon: icon_for_path(item.path.as_str()),
             path: item.path.clone().into(),
             meta: format_result_meta(item.path.as_str()).into(),
@@ -544,6 +756,33 @@ fn apply_results_for_filter(
     *result_paths.lock() = paths;
 
     row_count
+}
+
+fn record_opened_item(opened_item_history: &Arc<Mutex<OpenedItemHistory>>, path: &str) {
+    let mut history = opened_item_history.lock();
+    if let Err(err) = history.record_open(path) {
+        xlog::warn(format!("record opened item failed path={}: {err:#}", path));
+    }
+}
+
+fn opened_item_history_path() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Xun")
+        .join("config")
+        .join(OPENED_ITEM_HISTORY_FILE_NAME)
+}
+
+fn normalize_opened_item_key(path: &str) -> String {
+    path.trim().replace('/', "\\").to_ascii_lowercase()
+}
+
+fn now_unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 fn icon_for_path(path: &str) -> Image {

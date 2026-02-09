@@ -14,7 +14,7 @@ mod xlog;
 
 use anyhow::Context;
 use app::XunApp;
-use server::StartInstalledServiceOutcome;
+use server::{StartInstalledServiceOutcome, StopInstalledServiceOutcome};
 use win::RunAsLaunchOutcome;
 
 fn main() -> anyhow::Result<()> {
@@ -127,5 +127,31 @@ fn main() -> anyhow::Result<()> {
     }
     let app = XunApp::new()?;
     xlog::info("client app constructed, entering run loop");
-    app.run()
+    let run_result = app.run();
+
+    match server::stop_installed_service_if_running() {
+        Ok(StopInstalledServiceOutcome::NotInstalled)
+        | Ok(StopInstalledServiceOutcome::AlreadyStopped)
+        | Ok(StopInstalledServiceOutcome::Stopped) => {}
+        Ok(StopInstalledServiceOutcome::RequiresElevation) => {
+            match win::launch_stop_service_elevated() {
+                Ok(RunAsLaunchOutcome::Started) => {}
+                Ok(RunAsLaunchOutcome::Cancelled) => {
+                    xlog::warn("shutdown auto-stop cancelled by user at UAC prompt")
+                }
+                Err(err) => {
+                    xlog::warn(format!(
+                        "shutdown auto-stop requires elevation, runas trigger failed: {err:#}"
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            xlog::warn(format!(
+                "shutdown auto-stop service failed, continue client shutdown: {err:#}"
+            ));
+        }
+    }
+
+    run_result
 }

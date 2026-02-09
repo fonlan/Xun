@@ -28,9 +28,9 @@ use windows::Win32::System::Services::{
     SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
     SERVICE_CHANGE_CONFIG, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_ERROR,
     SERVICE_ERROR_NORMAL, SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START,
-    SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING,
-    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
-    StartServiceCtrlDispatcherW, StartServiceW,
+    SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP,
+    SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS,
+    SetServiceStatus, StartServiceCtrlDispatcherW, StartServiceW,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -54,6 +54,14 @@ pub enum StartInstalledServiceOutcome {
     NotInstalled,
     AlreadyRunning,
     Started,
+    RequiresElevation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopInstalledServiceOutcome {
+    NotInstalled,
+    AlreadyStopped,
+    Stopped,
     RequiresElevation,
 }
 
@@ -345,6 +353,134 @@ pub fn start_current_service() -> Result<()> {
         let _ = CloseServiceHandle(scm);
     }
     Ok(())
+}
+
+pub fn stop_installed_service_if_running() -> Result<StopInstalledServiceOutcome> {
+    let scm = unsafe { OpenSCManagerW(None, None, SC_MANAGER_CONNECT) }
+        .context("OpenSCManagerW failed")?;
+
+    let service_name = to_wide(SERVICE_NAME);
+    let (service, can_stop_directly) = match unsafe {
+        OpenServiceW(
+            scm,
+            PCWSTR(service_name.as_ptr()),
+            SERVICE_QUERY_STATUS | SERVICE_STOP,
+        )
+    } {
+        Ok(handle) => (handle, true),
+        Err(err) => {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_SERVICE_DOES_NOT_EXIST {
+                unsafe {
+                    let _ = CloseServiceHandle(scm);
+                }
+                xlog::info("service is not installed, skip shutdown auto-stop");
+                return Ok(StopInstalledServiceOutcome::NotInstalled);
+            }
+            if code != ERROR_ACCESS_DENIED {
+                unsafe {
+                    let _ = CloseServiceHandle(scm);
+                }
+                return Err(err).context("OpenServiceW(shutdown auto-stop check) failed");
+            }
+
+            match unsafe { OpenServiceW(scm, PCWSTR(service_name.as_ptr()), SERVICE_QUERY_STATUS) }
+            {
+                Ok(handle) => (handle, false),
+                Err(query_err) => {
+                    let query_code = unsafe { GetLastError() };
+                    unsafe {
+                        let _ = CloseServiceHandle(scm);
+                    }
+
+                    if query_code == ERROR_SERVICE_DOES_NOT_EXIST {
+                        xlog::info("service is not installed, skip shutdown auto-stop");
+                        return Ok(StopInstalledServiceOutcome::NotInstalled);
+                    }
+                    if query_code == ERROR_ACCESS_DENIED {
+                        xlog::warn("service access denied on shutdown, request elevated stop");
+                        return Ok(StopInstalledServiceOutcome::RequiresElevation);
+                    }
+
+                    return Err(query_err)
+                        .context("OpenServiceW(query-only shutdown auto-stop check) failed");
+                }
+            }
+        }
+    };
+
+    let mut status = SERVICE_STATUS::default();
+    if let Err(err) = unsafe { QueryServiceStatus(service, &mut status) } {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        return Err(err).context("QueryServiceStatus(shutdown auto-stop check) failed");
+    }
+
+    if status.dwCurrentState == SERVICE_STOPPED {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        xlog::info("service already stopped, skip shutdown auto-stop");
+        return Ok(StopInstalledServiceOutcome::AlreadyStopped);
+    }
+
+    if !can_stop_directly {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        xlog::warn("service is installed but requires elevation to stop");
+        return Ok(StopInstalledServiceOutcome::RequiresElevation);
+    }
+
+    let mut service_status = SERVICE_STATUS::default();
+    if let Err(err) = unsafe { ControlService(service, SERVICE_CONTROL_STOP, &mut service_status) }
+    {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_SERVICE_NOT_ACTIVE {
+            unsafe {
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+            }
+            xlog::info("service already stopped, skip shutdown auto-stop");
+            return Ok(StopInstalledServiceOutcome::AlreadyStopped);
+        }
+        if code == ERROR_ACCESS_DENIED {
+            unsafe {
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+            }
+            xlog::warn("service stop needs elevation on shutdown");
+            return Ok(StopInstalledServiceOutcome::RequiresElevation);
+        }
+
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        return Err(err).context("ControlService(shutdown auto-stop) failed");
+    }
+
+    for _ in 0..30 {
+        let mut current = SERVICE_STATUS::default();
+        if unsafe { QueryServiceStatus(service, &mut current) }.is_err() {
+            break;
+        }
+        if current.dwCurrentState == SERVICE_STOPPED {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    unsafe {
+        let _ = CloseServiceHandle(service);
+        let _ = CloseServiceHandle(scm);
+    }
+    xlog::info("shutdown auto-stop service completed");
+    Ok(StopInstalledServiceOutcome::Stopped)
 }
 
 pub fn stop_current_service() -> Result<()> {

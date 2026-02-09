@@ -59,10 +59,8 @@ const HOTKEY_ID: i32 = 0x5151;
 const TRAY_ID: u32 = 0x9A11;
 const MENU_INSTALL_SERVICE_ID: usize = 1000;
 const MENU_UNINSTALL_SERVICE_ID: usize = 1001;
-const MENU_START_SERVICE_ID: usize = 1002;
-const MENU_STOP_SERVICE_ID: usize = 1003;
-const MENU_CLIENT_AUTOSTART_ID: usize = 1004;
-const MENU_EXIT_ID: usize = 1005;
+const MENU_CLIENT_AUTOSTART_ID: usize = 1002;
+const MENU_EXIT_ID: usize = 1003;
 const APP_ICON_RESOURCE_ID: usize = 1;
 const RUN_REG_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const CLIENT_AUTOSTART_VALUE_NAME: &str = "XunClient";
@@ -282,15 +280,11 @@ fn launch_uninstall_service() -> Result<RunAsLaunchOutcome> {
     launch_elevated_with_arg("--uninstall-service")
 }
 
-fn launch_start_service() -> Result<RunAsLaunchOutcome> {
+pub fn launch_start_service_elevated() -> Result<RunAsLaunchOutcome> {
     launch_elevated_with_arg("--start-service")
 }
 
-pub fn launch_start_service_elevated() -> Result<RunAsLaunchOutcome> {
-    launch_start_service()
-}
-
-fn launch_stop_service() -> Result<RunAsLaunchOutcome> {
+pub fn launch_stop_service_elevated() -> Result<RunAsLaunchOutcome> {
     launch_elevated_with_arg("--stop-service")
 }
 
@@ -796,24 +790,6 @@ unsafe extern "system" fn shell_wnd_proc(
                         xlog::error(format!("launch uninstall service command failed: {err:#}"));
                     }
                 },
-                MENU_START_SERVICE_ID => match launch_start_service() {
-                    Ok(RunAsLaunchOutcome::Started) => {}
-                    Ok(RunAsLaunchOutcome::Cancelled) => {
-                        xlog::warn("start service cancelled by user at UAC prompt")
-                    }
-                    Err(err) => {
-                        xlog::error(format!("launch start service command failed: {err:#}"));
-                    }
-                },
-                MENU_STOP_SERVICE_ID => match launch_stop_service() {
-                    Ok(RunAsLaunchOutcome::Started) => {}
-                    Ok(RunAsLaunchOutcome::Cancelled) => {
-                        xlog::warn("stop service cancelled by user at UAC prompt")
-                    }
-                    Err(err) => {
-                        xlog::error(format!("launch stop service command failed: {err:#}"));
-                    }
-                },
                 MENU_CLIENT_AUTOSTART_ID => match toggle_client_autostart() {
                     Ok(enabled) => {
                         xlog::info(format!("client autostart toggled, enabled={enabled}"));
@@ -868,22 +844,6 @@ fn show_tray_menu(hwnd: HWND) {
             MF_STRING,
             MENU_UNINSTALL_SERVICE_ID,
             w!("\u{5378}\u{8F7D}\u{7CFB}\u{7EDF}\u{670D}\u{52A1}"),
-        )
-    };
-    let _ = unsafe {
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_START_SERVICE_ID,
-            w!("\u{542F}\u{52A8}\u{7CFB}\u{7EDF}\u{670D}\u{52A1}"),
-        )
-    };
-    let _ = unsafe {
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_STOP_SERVICE_ID,
-            w!("\u{505C}\u{6B62}\u{7CFB}\u{7EDF}\u{670D}\u{52A1}"),
         )
     };
     let autostart_flags = if autostart_enabled {

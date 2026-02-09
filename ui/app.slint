@@ -1,0 +1,272 @@
+﻿import { LineEdit, ListView } from "std-widgets.slint";
+
+export struct ResultRow {
+    icon: image,
+    path: string,
+    meta: string,
+}
+
+export component AppWindow inherits Window {
+    in property <length> popup-width: 960px;
+    private property <length> input-height: 48px;
+    private property <length> panel-padding: 14px;
+    private property <length> filter-bar-height: 34px;
+    private property <length> filter-item-spacing: 6px;
+    private property <length> filter-min-item-width: 92px;
+    private property <length> collapsed-height: root.panel-padding * 2 + root.input-height;
+    private property <length> expanded-height: 520px;
+    private property <length> results-panel-height: root.expanded-height - root.panel-padding * 2 - 12px - root.input-height;
+    private property <length> filter-visible-width: root.popup-width - root.panel-padding * 2;
+    private property <length> filter-item-width: max(root.filter-min-item-width, (root.filter-visible-width - root.filter-item-spacing * (root.filter-labels.length - 1)) / root.filter-labels.length);
+    private property <length> filter-content-width: root.filter-item-width * root.filter-labels.length + root.filter-item-spacing * (root.filter-labels.length - 1);
+    out property <length> popup-height: root.show-results ? root.expanded-height : root.collapsed-height;
+
+    width: root.popup-width;
+    height: root.popup-height;
+    animate height {
+        duration: 180ms;
+        easing: ease-in-out;
+    }
+
+    title: "Xun";
+    icon: @image-url("../xun.png");
+    background: #00000000;
+    no-frame: true;
+    always-on-top: true;
+    default-font-family: "Microsoft YaHei UI";
+
+    in-out property <string> query;
+    in-out property <[ResultRow]> results;
+    in-out property <int> selected-index: -1;
+    in-out property <int> selected-filter-index: 0;
+    in-out property <int> total-match-count: 0;
+    in-out property <length> results-viewport-y: 0px;
+    in-out property <length> filter-viewport-x: 0px;
+    out property <length> results-visible-height: root.results-panel-height - 8px - root.filter-bar-height;
+    private property <length> result-row-height: 40px;
+    private property <length> result-row-padding-x: 12px;
+    private property <length> result-icon-width: 24px;
+    private property <length> result-icon-gap: 8px;
+    private property <length> result-meta-width: 210px;
+    private property <length> result-meta-gap: 10px;
+    private property <length> result-safe-inset-right: 1px;
+    private property <bool> show-results: root.query != "" && root.total-match-count > 0;
+    private property <[string]> filter-labels: ["全部", "可执行文件", "压缩文件", "文本文件", "办公文档", "音频文件", "视频文件", "图片文件", "其他文件"];
+
+    callback query-changed(string);
+    callback submit(string);
+    callback item-activated(string);
+    callback filter-selected(int);
+    callback esc-pressed();
+    callback drag-window-start();
+    callback drag-window-move();
+    callback selection-up();
+    callback selection-down();
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        clip: true;
+        background: #161A22E8;
+        border-radius: 14px;
+        border-width: 1px;
+        border-color: #3C4355;
+
+        TouchArea {
+            width: parent.width;
+            height: parent.height;
+            moved => {
+                if (self.pressed) {
+                    root.drag-window-move();
+                }
+            }
+            pointer-event(event) => {
+                if (
+                    event.kind == PointerEventKind.down
+                    && (
+                        self.mouse-x <= 10px
+                        || self.mouse-y <= 10px
+                        || self.mouse-x >= root.width - 10px
+                        || self.mouse-y >= root.height - 10px
+                    )
+                ) {
+                    root.drag-window-start();
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 12px;
+
+            LineEdit {
+                text <=> root.query;
+                placeholder-text: "输入命令或文件名...";
+                font-family: "Microsoft YaHei UI";
+                font-size: 22px;
+                height: root.input-height;
+                accepted => { root.submit(self.text); }
+                edited => { root.query-changed(self.text); }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.esc-pressed();
+                        return accept;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        root.selection-up();
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        root.selection-down();
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+
+            if (root.show-results) : Rectangle {
+                height: root.results-panel-height;
+                horizontal-stretch: 1;
+                clip: true;
+                animate opacity {
+                    duration: 130ms;
+                    easing: ease-in;
+                }
+
+                VerticalLayout {
+                    spacing: 8px;
+
+                    Rectangle {
+                        height: root.filter-bar-height;
+                        background: #00000000;
+
+                        Flickable {
+                            width: parent.width;
+                            height: parent.height;
+                            interactive: true;
+                            viewport-width: root.filter-content-width;
+                            viewport-height: root.filter-bar-height;
+                            viewport-x <=> root.filter-viewport-x;
+                            viewport-y: 0px;
+
+                            HorizontalLayout {
+                                width: root.filter-content-width;
+                                height: root.filter-bar-height;
+                                spacing: root.filter-item-spacing;
+
+                                for label[index] in root.filter-labels : Rectangle {
+                                    height: root.filter-bar-height;
+                                    width: root.filter-item-width;
+                                    background: index == root.selected-filter-index ? #36507A : #232A38;
+                                    border-radius: 8px;
+                                    border-width: 1px;
+                                    border-color: index == root.selected-filter-index ? #6E8FC6 : #3A4252;
+
+                                    TouchArea {
+                                        width: parent.width;
+                                        height: parent.height;
+                                        clicked => {
+                                            root.filter-selected(index);
+                                        }
+                                        scroll-event(event) => {
+                                            let min-x = min(0px, root.filter-visible-width - root.filter-content-width);
+                                            let next = root.filter-viewport-x + event.delta-x + event.delta-y;
+                                            root.filter-viewport-x = max(min-x, min(0px, next));
+                                            return accept;
+                                        }
+                                    }
+
+                                    Text {
+                                        text: label;
+                                        font-family: "Microsoft YaHei UI";
+                                        color: index == root.selected-filter-index ? #EAF0FF : #A9B5CD;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (root.results.length > 0) : results-list := ListView {
+                        height: root.results-visible-height;
+                        horizontal-stretch: 1;
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                        viewport-width: self.visible-width;
+                        viewport-x: 0px;
+                        viewport-y <=> root.results-viewport-y;
+
+                        for item[index] in root.results : row := Rectangle {
+                            width: max(0px, results-list.visible-width - root.result-safe-inset-right);
+                            height: root.result-row-height;
+                            clip: true;
+                            background: index == root.selected-index ? #36507A : #202634;
+                            border-radius: 8px;
+
+                            TouchArea {
+                                width: row.width;
+                                height: row.height;
+                                clicked => {
+                                    root.selected-index = index;
+                                    root.item-activated(item.path);
+                                }
+                            }
+
+                            Image {
+                                x: root.result-row-padding-x;
+                                y: (row.height - root.result-icon-width) / 2;
+                                width: root.result-icon-width;
+                                height: root.result-icon-width;
+                                source: item.icon;
+                                image-fit: contain;
+                            }
+
+                            Text {
+                                x: root.result-row-padding-x + root.result-icon-width + root.result-icon-gap;
+                                y: 0px;
+                                width: max(0px, row.width - root.result-row-padding-x * 2 - root.result-icon-width - root.result-icon-gap - root.result-meta-gap - root.result-meta-width);
+                                height: row.height;
+                                text: item.path;
+                                font-family: "Microsoft YaHei UI";
+                                color: #EAF0FF;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                x: row.width - root.result-row-padding-x - root.result-meta-width;
+                                y: 0px;
+                                width: root.result-meta-width;
+                                height: row.height;
+                                text: item.meta;
+                                font-family: "Microsoft YaHei UI";
+                                color: #9DB1D6;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    if (root.results.length == 0) : Rectangle {
+                        height: root.results-visible-height;
+                        horizontal-stretch: 1;
+                        background: #1E2431;
+                        border-radius: 8px;
+
+                        Text {
+                            text: "当前筛选条件下无结果";
+                            font-family: "Microsoft YaHei UI";
+                            color: #8E9AB5;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+

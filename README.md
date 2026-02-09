@@ -1,0 +1,107 @@
+# Xun
+
+Xun 是一个基于 Rust + Slint 的 Windows 本地文件快速检索与启动器。
+
+它通过系统托盘和全局快捷键（`Alt+Space`）唤起搜索面板，后台使用 Windows 服务维护文件索引，并通过命名管道向前端提供查询结果。
+
+## 主要特性
+
+- 全局快捷键唤起：`Alt+Space`
+- 托盘菜单：安装/卸载/启动/停止系统服务、切换客户端开机启动、退出
+- NTFS 高性能索引：基于 MFT 枚举 + USN Journal 增量更新
+- IPC 查询：客户端与服务端通过 `\\.\pipe\xun.search.v1` 通信
+- 文件类型筛选：全部、可执行、压缩、文本、办公、音频、视频、图片、其他
+- 结果交互：上下键选择、回车打开、Esc 关闭、失焦自动隐藏
+
+## 技术架构
+
+- `src/main.rs`：启动入口，区分客户端/服务端及服务管理命令
+- `src/app.rs`：Slint UI 逻辑、输入防抖、查询线程、结果渲染
+- `src/server.rs`：Windows 服务注册与生命周期管理、管道服务
+- `src/index.rs`：文件索引与检索核心（前缀 + trigram + 子串匹配）
+- `src/ipc.rs`：命名管道协议编解码与重试逻辑
+- `src/win.rs`：Win32 桥接（全局热键、托盘、ShellExecute、注册表开机启动）
+- `ui/app.slint`：界面定义与交互事件
+
+## 运行环境
+
+- Windows（当前实现依赖 Win32 API 与 NTFS）
+- Rust 工具链（建议 stable 最新版）
+
+## 快速开始（开发者）
+
+1. 构建并运行客户端：
+
+```powershell
+cargo run
+```
+
+2. （可选）通过命令安装并启动后台服务（需要管理员权限）：
+
+```powershell
+cargo run -- --install-service
+```
+
+> 说明：客户端查询依赖后台索引服务。若服务未运行，输入内容仍可作为路径/命令尝试直接打开，但不会返回索引检索结果。
+
+## 普通用户使用方法
+
+1. 启动程序（双击 `xun.exe`）。
+2. 右键系统托盘中的 Xun 图标。
+3. 点击“安装系统服务”。
+
+完成后即可正常使用检索能力（`Alt+Space` 唤起）。
+
+## 更新方法
+
+1. 右键托盘图标，点击“停止系统服务”。
+2. 在原路径更新可执行文件（覆盖旧文件）。
+3. 重新运行程序。
+4. 右键托盘图标，点击“启动系统服务”。
+
+## 命令行参数
+
+程序支持以下参数（均在 `src/main.rs` 中定义）：
+
+- `--install-service`：安装并启动系统服务（需管理员）
+- `--uninstall-service`：卸载系统服务（需管理员）
+- `--start-service`：启动已安装服务（需管理员）
+- `--stop-service`：停止已安装服务（需管理员）
+- `--server`：以服务端模式运行（供 SCM 或手动前台启动）
+
+## 开发命令
+
+```powershell
+cargo check
+cargo fmt
+cargo clippy --all-targets -- -D warnings
+```
+
+## 日志与排障
+
+- 日志文件：`%AppData%\Xun\logs\xun-YYYY-MM-DD.log`（按日期分割）
+- 如果检索无结果，优先检查：
+  - 服务是否已安装并运行
+  - 进程是否有足够权限访问卷与 USN
+  - 是否仅在非 NTFS 分区查找
+
+## 目录结构
+
+```text
+.
+├─ src/
+│  ├─ main.rs
+│  ├─ app.rs
+│  ├─ server.rs
+│  ├─ index.rs
+│  ├─ ipc.rs
+│  ├─ win.rs
+│  ├─ model.rs
+│  ├─ arena.rs
+│  └─ xlog.rs
+├─ ui/
+│  └─ app.slint
+├─ build.rs
+├─ Cargo.toml
+└─ xun.png
+```

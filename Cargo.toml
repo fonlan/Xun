@@ -1,0 +1,52 @@
+[package]
+name = "xun"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = true, features = ["clock"] }
+crossbeam-channel = "0.5"
+memmap2 = "0.9"
+mft = "0.6"
+ntfs = "0.4"
+once_cell = "1"
+parking_lot = "0.12"
+rayon = "1"
+slint = { version = "1.15", default-features = false, features = ["compat-1-2", "backend-winit", "renderer-winit-skia", "std", "unstable-winit-030"] }
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[build-dependencies]
+ico = "0.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
+slint-build = "1.15"
+winres = "0.1"
+
+[profile.release]
+codegen-units = 1 # 最大化优化，牺牲编译速度
+lto = true        # 开启链接时优化 (Link Time Optimization)
+opt-level = 3     # 针对体积进行优化 (如果追求极致性能可改为 3)
+panic = "abort" # 移除 Panic 回溯信息，减小体积
+# 注释掉以保留 panic 堆栈信息，便于调试闪退问题
+strip = true      # 自动剥离符号表

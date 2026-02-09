@@ -17,26 +17,41 @@ use app::XunApp;
 use server::{StartInstalledServiceOutcome, StopInstalledServiceOutcome};
 use win::RunAsLaunchOutcome;
 
+fn ensure_mode_elevated(mode_flag: &str) -> anyhow::Result<()> {
+    win::assert_elevated().context("failed to check admin privilege")?;
+    if !win::is_elevated()? {
+        return Err(anyhow::anyhow!(
+            "{mode_flag} mode requires elevated/admin privilege"
+        ));
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     xlog::init_session();
     xlog::info("bootstrap start");
 
-    let args = std::env::args().collect::<Vec<_>>();
-    let install_service_mode = args.iter().skip(1).any(|arg| arg == "--install-service");
-    let uninstall_service_mode = args.iter().skip(1).any(|arg| arg == "--uninstall-service");
-    let start_service_mode = args.iter().skip(1).any(|arg| arg == "--start-service");
-    let stop_service_mode = args.iter().skip(1).any(|arg| arg == "--stop-service");
-    let server_mode = args.iter().skip(1).any(|arg| arg == "--server");
+    let mut install_service_mode = false;
+    let mut uninstall_service_mode = false;
+    let mut start_service_mode = false;
+    let mut stop_service_mode = false;
+    let mut server_mode = false;
+
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--install-service" => install_service_mode = true,
+            "--uninstall-service" => uninstall_service_mode = true,
+            "--start-service" => start_service_mode = true,
+            "--stop-service" => stop_service_mode = true,
+            "--server" => server_mode = true,
+            _ => {}
+        }
+    }
 
     if install_service_mode {
         xlog::info("startup mode: install-service");
 
-        win::assert_elevated().context("failed to check admin privilege")?;
-        if !win::is_elevated()? {
-            return Err(anyhow::anyhow!(
-                "--install-service mode requires elevated/admin privilege"
-            ));
-        }
+        ensure_mode_elevated("--install-service")?;
 
         server::install_and_start_current_service()?;
         xlog::info("install-service completed");
@@ -46,12 +61,7 @@ fn main() -> anyhow::Result<()> {
     if uninstall_service_mode {
         xlog::info("startup mode: uninstall-service");
 
-        win::assert_elevated().context("failed to check admin privilege")?;
-        if !win::is_elevated()? {
-            return Err(anyhow::anyhow!(
-                "--uninstall-service mode requires elevated/admin privilege"
-            ));
-        }
+        ensure_mode_elevated("--uninstall-service")?;
 
         server::uninstall_current_service()?;
         xlog::info("uninstall-service completed");
@@ -61,12 +71,7 @@ fn main() -> anyhow::Result<()> {
     if start_service_mode {
         xlog::info("startup mode: start-service");
 
-        win::assert_elevated().context("failed to check admin privilege")?;
-        if !win::is_elevated()? {
-            return Err(anyhow::anyhow!(
-                "--start-service mode requires elevated/admin privilege"
-            ));
-        }
+        ensure_mode_elevated("--start-service")?;
 
         server::start_current_service()?;
         xlog::info("start-service completed");
@@ -76,12 +81,7 @@ fn main() -> anyhow::Result<()> {
     if stop_service_mode {
         xlog::info("startup mode: stop-service");
 
-        win::assert_elevated().context("failed to check admin privilege")?;
-        if !win::is_elevated()? {
-            return Err(anyhow::anyhow!(
-                "--stop-service mode requires elevated/admin privilege"
-            ));
-        }
+        ensure_mode_elevated("--stop-service")?;
 
         server::stop_current_service()?;
         xlog::info("stop-service completed");
@@ -91,12 +91,7 @@ fn main() -> anyhow::Result<()> {
     if server_mode {
         xlog::info("startup mode: server");
 
-        win::assert_elevated().context("failed to check admin privilege")?;
-        if !win::is_elevated()? {
-            return Err(anyhow::anyhow!(
-                "--server mode requires elevated/admin privilege"
-            ));
-        }
+        ensure_mode_elevated("--server")?;
 
         return server::run_server_mode();
     }

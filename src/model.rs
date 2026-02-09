@@ -1,5 +1,56 @@
 use crate::arena::SliceRef;
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
+
+use once_cell::sync::Lazy;
+
+const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "msi", "bat", "cmd", "com", "ps1", "vbs", "scr"];
+const ARCHIVE_EXTENSIONS: &[&str] = &[
+    "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "cab", "iso",
+];
+const TEXT_EXTENSIONS: &[&str] = &[
+    "txt", "md", "markdown", "log", "ini", "cfg", "conf", "toml", "yaml", "yml", "json", "xml",
+    "csv", "tsv", "rs", "py", "js", "ts", "jsx", "tsx", "java", "c", "cpp", "h", "hpp", "cs", "go",
+    "php", "rb", "sh", "psm1",
+];
+const OFFICE_EXTENSIONS: &[&str] = &[
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "pdf", "wps", "et", "dps", "odt", "ods", "odp",
+];
+const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "wav", "flac", "aac", "m4a", "ogg", "wma", "ape", "amr",
+];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "ts",
+];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tif", "tiff", "heic", "raw", "psd",
+];
+
+static EXTENSION_KIND_MAP: Lazy<HashMap<&'static str, FileTypeFilter>> =
+    Lazy::new(build_extension_kind_map);
+
+fn register_extensions(
+    map: &mut HashMap<&'static str, FileTypeFilter>,
+    kind: FileTypeFilter,
+    extensions: &[&'static str],
+) {
+    for &ext in extensions {
+        map.entry(ext).or_insert(kind);
+    }
+}
+
+fn build_extension_kind_map() -> HashMap<&'static str, FileTypeFilter> {
+    let mut map = HashMap::new();
+    register_extensions(&mut map, FileTypeFilter::Executable, EXECUTABLE_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Archive, ARCHIVE_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Text, TEXT_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Office, OFFICE_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Audio, AUDIO_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Video, VIDEO_EXTENSIONS);
+    register_extensions(&mut map, FileTypeFilter::Image, IMAGE_EXTENSIONS);
+    map
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct FileMeta {
@@ -70,111 +121,19 @@ impl FileTypeFilter {
 }
 
 pub fn classify_path_kind(path: &str) -> &'static str {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase());
-
-    let Some(ext) = extension.as_deref() else {
+    let Some(extension) = Path::new(path).extension().and_then(|ext| ext.to_str()) else {
         return FileTypeFilter::Other.key();
     };
 
-    if matches!(
-        ext,
-        "exe" | "msi" | "bat" | "cmd" | "com" | "ps1" | "vbs" | "scr"
-    ) {
-        return FileTypeFilter::Executable.key();
-    }
-    if matches!(
-        ext,
-        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz" | "tgz" | "cab" | "iso"
-    ) {
-        return FileTypeFilter::Archive.key();
-    }
-    if matches!(
-        ext,
-        "txt"
-            | "md"
-            | "markdown"
-            | "log"
-            | "ini"
-            | "cfg"
-            | "conf"
-            | "toml"
-            | "yaml"
-            | "yml"
-            | "json"
-            | "xml"
-            | "csv"
-            | "tsv"
-            | "rs"
-            | "py"
-            | "js"
-            | "ts"
-            | "jsx"
-            | "tsx"
-            | "java"
-            | "c"
-            | "cpp"
-            | "h"
-            | "hpp"
-            | "cs"
-            | "go"
-            | "php"
-            | "rb"
-            | "sh"
-            | "psm1"
-    ) {
-        return FileTypeFilter::Text.key();
-    }
-    if matches!(
-        ext,
-        "doc"
-            | "docx"
-            | "xls"
-            | "xlsx"
-            | "ppt"
-            | "pptx"
-            | "pdf"
-            | "wps"
-            | "et"
-            | "dps"
-            | "odt"
-            | "ods"
-            | "odp"
-    ) {
-        return FileTypeFilter::Office.key();
-    }
-    if matches!(
-        ext,
-        "mp3" | "wav" | "flac" | "aac" | "m4a" | "ogg" | "wma" | "ape" | "amr"
-    ) {
-        return FileTypeFilter::Audio.key();
-    }
-    if matches!(
-        ext,
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpeg" | "mpg" | "ts"
-    ) {
-        return FileTypeFilter::Video.key();
-    }
-    if matches!(
-        ext,
-        "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "bmp"
-            | "webp"
-            | "svg"
-            | "ico"
-            | "tif"
-            | "tiff"
-            | "heic"
-            | "raw"
-            | "psd"
-    ) {
-        return FileTypeFilter::Image.key();
-    }
+    let ext_key = if extension.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(extension.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(extension)
+    };
 
-    FileTypeFilter::Other.key()
+    EXTENSION_KIND_MAP
+        .get(ext_key.as_ref())
+        .copied()
+        .unwrap_or(FileTypeFilter::Other)
+        .key()
 }

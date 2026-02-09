@@ -156,11 +156,10 @@ impl FileIndex {
                 let mut pending = Vec::with_capacity(4096);
                 let started = Instant::now();
 
-                let frns = snapshot.tree.keys().copied().collect::<Vec<_>>();
                 let tree = &snapshot.tree;
                 let mut path_cache = HashMap::<u64, Option<String>>::with_capacity(tree.len() / 2);
 
-                for frn in frns {
+                for frn in tree.keys().copied() {
                     let Some(path) = build_full_path_cached(letter, frn, tree, &mut path_cache)
                     else {
                         continue;

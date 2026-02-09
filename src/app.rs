@@ -32,11 +32,13 @@ const QUERY_DEBOUNCE_THREE_TO_FOUR_CHARS_MS: u64 = 90;
 const QUERY_DEBOUNCE_LONG_QUERY_MS: u64 = 60;
 const RESULT_ICON_SIZE_PX: u32 = 24;
 const MAX_RESULT_ICON_CACHE: usize = 4096;
+const MAX_RESULT_META_CACHE: usize = 4096;
 const OPENED_ITEM_HISTORY_FILE_NAME: &str = "opened-items.v1";
 const MAX_OPENED_ITEM_HISTORY: usize = 2048;
 
 thread_local! {
     static RESULT_ICON_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
+    static RESULT_META_CACHE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Clone)]
@@ -359,6 +361,7 @@ impl XunApp {
                 result_paths_for_query_clear.lock().clear();
                 all_results_for_query_clear.lock().clear();
                 clear_result_icon_cache();
+                clear_result_meta_cache();
                 *last_dispatched_query_for_ui.lock() = None;
                 xlog::info("query_changed empty: cleared results");
                 return;
@@ -639,6 +642,7 @@ impl XunApp {
                     window.set_results_viewport_y(0.0);
                     all_results_for_activate.lock().clear();
                     clear_result_icon_cache();
+                    clear_result_meta_cache();
 
                     let previous_initial_index_ready = window.get_initial_index_ready();
                     match ipc_client_for_activate.check_initial_index_ready_quick() {
@@ -735,22 +739,20 @@ fn apply_results_for_filter(
 
     filtered.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
-    let filtered = filtered
-        .into_iter()
-        .map(|(_, _, item)| ResultRow {
-            icon: icon_for_path(item.path.as_str()),
-            path: item.path.clone().into(),
-            meta: format_result_meta(item.path.as_str()).into(),
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::with_capacity(filtered.len());
+    let mut paths = Vec::with_capacity(filtered.len());
+    for (_, _, item) in filtered {
+        let path = item.path.clone();
+        rows.push(ResultRow {
+            icon: icon_for_path(path.as_str()),
+            path: path.as_str().into(),
+            meta: meta_for_path(path.as_str()).into(),
+        });
+        paths.push(path);
+    }
 
-    let paths = filtered
-        .iter()
-        .map(|item| item.path.to_string())
-        .collect::<Vec<_>>();
-
-    let row_count = filtered.len();
-    window.set_results(ModelRc::new(VecModel::from(filtered)));
+    let row_count = rows.len();
+    window.set_results(ModelRc::new(VecModel::from(rows)));
     window.set_selected_index(if row_count > 0 { 0 } else { -1 });
     window.set_results_viewport_y(0.0);
     *result_paths.lock() = paths;
@@ -803,6 +805,28 @@ fn icon_for_path(path: &str) -> Image {
 
 fn clear_result_icon_cache() {
     RESULT_ICON_CACHE.with(|cache_cell| {
+        cache_cell.borrow_mut().clear();
+    });
+}
+
+fn meta_for_path(path: &str) -> String {
+    RESULT_META_CACHE.with(|cache_cell| {
+        let mut cache = cache_cell.borrow_mut();
+        if let Some(meta) = cache.get(path) {
+            return meta.clone();
+        }
+
+        let meta = format_result_meta(path);
+        if cache.len() >= MAX_RESULT_META_CACHE {
+            cache.clear();
+        }
+        cache.insert(path.to_string(), meta.clone());
+        meta
+    })
+}
+
+fn clear_result_meta_cache() {
+    RESULT_META_CACHE.with(|cache_cell| {
         cache_cell.borrow_mut().clear();
     });
 }

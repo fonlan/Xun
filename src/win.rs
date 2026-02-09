@@ -1,5 +1,5 @@
-use std::ffi::c_void;
 use std::ffi::OsStr;
+use std::ffi::c_void;
 use std::iter;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
@@ -11,13 +11,13 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HWND, LPARAM,
-    LRESULT, POINT, RECT, WPARAM,
+    CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HWND,
+    LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
-    DeleteDC, DeleteObject, GetMonitorInfoW, HDC, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromPoint, SelectObject,
+    DeleteDC, DeleteObject, GetMonitorInfoW, HDC, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, SelectObject,
 };
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::Storage::FileSystem::{
@@ -26,19 +26,18 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS,
-    REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW,
-    RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE,
+    REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_SPACE,
+    GetAsyncKeyState, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_LBUTTON, VK_SPACE,
 };
 use windows::Win32::UI::Shell::{
-    SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES,
-    SHGetFileInfoW,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, SHFILEINFOW, SHGFI_ICON,
+    SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, Shell_NotifyIconW,
     ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -67,6 +66,12 @@ const MENU_EXIT_ID: usize = 1005;
 const APP_ICON_RESOURCE_ID: usize = 1;
 const RUN_REG_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const CLIENT_AUTOSTART_VALUE_NAME: &str = "XunClient";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunAsLaunchOutcome {
+    Started,
+    Cancelled,
+}
 
 struct OwnedRegKey(HKEY);
 
@@ -135,7 +140,9 @@ pub fn load_file_icon_image(path: &str, size_px: u32) -> Option<Image> {
 
     let icon_size = size_px.clamp(16, 64) as i32;
     let path_w = to_wide(path);
-    let is_dir = std::fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false);
+    let is_dir = std::fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false);
     let file_attrs = if is_dir {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
@@ -180,14 +187,16 @@ fn hicon_to_slint_image(icon: HICON, size_px: i32) -> Option<Image> {
             return None;
         }
 
-        let mut bitmap_info = BITMAPINFO::default();
-        bitmap_info.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size_px,
-            biHeight: -size_px,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let bitmap_info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size_px,
+                biHeight: -size_px,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -207,18 +216,7 @@ fn hicon_to_slint_image(icon: HICON, size_px: i32) -> Option<Image> {
         }
 
         let old_bitmap = SelectObject(dc, bitmap);
-        let draw_ok = DrawIconEx(
-            dc,
-            0,
-            0,
-            icon,
-            size_px,
-            size_px,
-            0,
-            None,
-            DI_NORMAL,
-        )
-        .is_ok();
+        let draw_ok = DrawIconEx(dc, 0, 0, icon, size_px, size_px, 0, None, DI_NORMAL).is_ok();
 
         let image = if draw_ok {
             let pixel_count = (size_px * size_px) as usize;
@@ -276,79 +274,30 @@ fn shell_execute_open(target: &str, args: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn launch_install_service() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let exe_w = to_wide(exe.to_string_lossy().as_ref());
-    let args_w = to_wide("--install-service");
-
-    unsafe {
-        let ret = ShellExecuteW(
-            None,
-            w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            PCWSTR(args_w.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-
-        if ret.0 as isize <= 32 {
-            return Err(anyhow!("ShellExecute runas failed, code={:?}", ret.0));
-        }
-    }
-
-    Ok(())
+fn launch_install_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--install-service")
 }
 
-fn launch_uninstall_service() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let exe_w = to_wide(exe.to_string_lossy().as_ref());
-    let args_w = to_wide("--uninstall-service");
-
-    unsafe {
-        let ret = ShellExecuteW(
-            None,
-            w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            PCWSTR(args_w.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-
-        if ret.0 as isize <= 32 {
-            return Err(anyhow!("ShellExecute runas failed, code={:?}", ret.0));
-        }
-    }
-
-    Ok(())
+fn launch_uninstall_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--uninstall-service")
 }
 
-fn launch_start_service() -> Result<()> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let exe_w = to_wide(exe.to_string_lossy().as_ref());
-    let args_w = to_wide("--start-service");
-
-    unsafe {
-        let ret = ShellExecuteW(
-            None,
-            w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            PCWSTR(args_w.as_ptr()),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        );
-
-        if ret.0 as isize <= 32 {
-            return Err(anyhow!("ShellExecute runas failed, code={:?}", ret.0));
-        }
-    }
-
-    Ok(())
+fn launch_start_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--start-service")
 }
 
-fn launch_stop_service() -> Result<()> {
+pub fn launch_start_service_elevated() -> Result<RunAsLaunchOutcome> {
+    launch_start_service()
+}
+
+fn launch_stop_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--stop-service")
+}
+
+fn launch_elevated_with_arg(arg: &str) -> Result<RunAsLaunchOutcome> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let exe_w = to_wide(exe.to_string_lossy().as_ref());
-    let args_w = to_wide("--stop-service");
+    let args_w = to_wide(arg);
 
     unsafe {
         let ret = ShellExecuteW(
@@ -360,12 +309,21 @@ fn launch_stop_service() -> Result<()> {
             SW_SHOWNORMAL,
         );
 
-        if ret.0 as isize <= 32 {
-            return Err(anyhow!("ShellExecute runas failed, code={:?}", ret.0));
+        if ret.0 as isize > 32 {
+            return Ok(RunAsLaunchOutcome::Started);
         }
-    }
 
-    Ok(())
+        let last_error = GetLastError();
+        if ret.0 as isize == 5 || last_error == ERROR_CANCELLED {
+            return Ok(RunAsLaunchOutcome::Cancelled);
+        }
+
+        Err(anyhow!(
+            "ShellExecute runas failed, code={:?}, last_error={}",
+            ret.0,
+            last_error.0
+        ))
+    }
 }
 
 fn client_autostart_command() -> Result<String> {
@@ -391,10 +349,7 @@ fn open_run_key(sam_desired: REG_SAM_FLAGS) -> Result<OwnedRegKey> {
         );
 
         if status != ERROR_SUCCESS {
-            return Err(anyhow!(
-                "RegCreateKeyExW(HKCU\\Run) failed: {}",
-                status.0
-            ));
+            return Err(anyhow!("RegCreateKeyExW(HKCU\\Run) failed: {}", status.0));
         }
 
         Ok(OwnedRegKey(key))
@@ -448,7 +403,7 @@ fn read_run_value(name: &str) -> Result<Option<String>> {
             ));
         }
 
-        if value_type != REG_SZ || value_size < 2 || value_size % 2 != 0 {
+        if value_type != REG_SZ || value_size < 2 || !value_size.is_multiple_of(2) {
             return Ok(None);
         }
 
@@ -470,7 +425,7 @@ fn read_run_value(name: &str) -> Result<Option<String>> {
             ));
         }
 
-        if value_type != REG_SZ || value_size < 2 || value_size % 2 != 0 {
+        if value_type != REG_SZ || value_size < 2 || !value_size.is_multiple_of(2) {
             return Ok(None);
         }
 
@@ -607,10 +562,10 @@ pub fn is_placeholder_attr(attributes: u32) -> bool {
 }
 
 pub fn launcher_popup_position(window_width: i32, window_height: i32) -> (i32, i32) {
-    if let Some(cursor) = cursor_position() {
-        if let Some(work_area) = monitor_work_area_for_point(cursor) {
-            return popup_position_in_rect(work_area, window_width, window_height);
-        }
+    if let Some(cursor) = cursor_position()
+        && let Some(work_area) = monitor_work_area_for_point(cursor)
+    {
+        return popup_position_in_rect(work_area, window_width, window_height);
     }
 
     unsafe {
@@ -666,6 +621,10 @@ pub fn cursor_position() -> Option<(i32, i32)> {
             None
         }
     }
+}
+
+pub fn is_left_mouse_button_down() -> bool {
+    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
 }
 
 fn monitor_work_area_for_point((x, y): (i32, i32)) -> Option<RECT> {
@@ -819,26 +778,42 @@ unsafe extern "system" fn shell_wnd_proc(
         }
         WM_COMMAND => {
             match loword(wparam.0 as u32) as usize {
-                MENU_INSTALL_SERVICE_ID => {
-                    if let Err(err) = launch_install_service() {
+                MENU_INSTALL_SERVICE_ID => match launch_install_service() {
+                    Ok(RunAsLaunchOutcome::Started) => {}
+                    Ok(RunAsLaunchOutcome::Cancelled) => {
+                        xlog::warn("install service cancelled by user at UAC prompt")
+                    }
+                    Err(err) => {
                         xlog::error(format!("launch install service command failed: {err:#}"));
                     }
-                }
-                MENU_UNINSTALL_SERVICE_ID => {
-                    if let Err(err) = launch_uninstall_service() {
+                },
+                MENU_UNINSTALL_SERVICE_ID => match launch_uninstall_service() {
+                    Ok(RunAsLaunchOutcome::Started) => {}
+                    Ok(RunAsLaunchOutcome::Cancelled) => {
+                        xlog::warn("uninstall service cancelled by user at UAC prompt")
+                    }
+                    Err(err) => {
                         xlog::error(format!("launch uninstall service command failed: {err:#}"));
                     }
-                }
-                MENU_START_SERVICE_ID => {
-                    if let Err(err) = launch_start_service() {
+                },
+                MENU_START_SERVICE_ID => match launch_start_service() {
+                    Ok(RunAsLaunchOutcome::Started) => {}
+                    Ok(RunAsLaunchOutcome::Cancelled) => {
+                        xlog::warn("start service cancelled by user at UAC prompt")
+                    }
+                    Err(err) => {
                         xlog::error(format!("launch start service command failed: {err:#}"));
                     }
-                }
-                MENU_STOP_SERVICE_ID => {
-                    if let Err(err) = launch_stop_service() {
+                },
+                MENU_STOP_SERVICE_ID => match launch_stop_service() {
+                    Ok(RunAsLaunchOutcome::Started) => {}
+                    Ok(RunAsLaunchOutcome::Cancelled) => {
+                        xlog::warn("stop service cancelled by user at UAC prompt")
+                    }
+                    Err(err) => {
                         xlog::error(format!("launch stop service command failed: {err:#}"));
                     }
-                }
+                },
                 MENU_CLIENT_AUTOSTART_ID => match toggle_client_autostart() {
                     Ok(enabled) => {
                         xlog::info(format!("client autostart toggled, enabled={enabled}"));
@@ -924,14 +899,7 @@ fn show_tray_menu(hwnd: HWND) {
             w!("\u{5F00}\u{673A}\u{542F}\u{52A8}\u{5BA2}\u{6237}\u{7AEF}"),
         )
     };
-    let _ = unsafe {
-        AppendMenuW(
-            menu,
-            MF_STRING,
-            MENU_EXIT_ID,
-            w!("\u{9000}\u{51FA} Xun"),
-        )
-    };
+    let _ = unsafe { AppendMenuW(menu, MF_STRING, MENU_EXIT_ID, w!("\u{9000}\u{51FA} Xun")) };
 
     let mut point = POINT::default();
     let _ = unsafe { GetCursorPos(&mut point) };
@@ -958,13 +926,7 @@ fn show_tray_menu(hwnd: HWND) {
 }
 
 fn add_tray_icon(hwnd: HWND) -> Result<()> {
-    let mut data = NOTIFYICONDATAW::default();
-    data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    data.hWnd = hwnd;
-    data.uID = TRAY_ID;
-    data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-    data.uCallbackMessage = WM_TRAYICON;
-    data.hIcon = match load_app_icon() {
+    let tray_icon = match load_app_icon() {
         Ok(icon) => icon,
         Err(err) => {
             xlog::warn(format!(
@@ -973,6 +935,16 @@ fn add_tray_icon(hwnd: HWND) -> Result<()> {
             unsafe { LoadIconW(None, IDI_APPLICATION) }
                 .context("LoadIconW(IDI_APPLICATION) failed")?
         }
+    };
+
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ID,
+        uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        uCallbackMessage: WM_TRAYICON,
+        hIcon: tray_icon,
+        ..Default::default()
     };
 
     let tip = to_wide("Xun Launcher");
@@ -994,10 +966,12 @@ fn load_app_icon() -> Result<HICON> {
 }
 
 fn remove_tray_icon(hwnd: HWND) -> Result<()> {
-    let mut data = NOTIFYICONDATAW::default();
-    data.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
-    data.hWnd = hwnd;
-    data.uID = TRAY_ID;
+    let data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ID,
+        ..Default::default()
+    };
 
     let ok = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
     if !ok.as_bool() {

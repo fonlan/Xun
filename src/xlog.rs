@@ -46,11 +46,7 @@ fn sink() -> &'static Mutex<Option<File>> {
             let _ = create_dir_all(parent);
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
+        let file = OpenOptions::new().create(true).append(true).open(path).ok();
         Mutex::new(file)
     })
 }

@@ -5,10 +5,10 @@ use std::thread;
 
 use anyhow::{Context, Result, anyhow};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT, ERROR_NO_DATA,
-    ERROR_PIPE_CONNECTED, ERROR_SERVICE_ALREADY_RUNNING, ERROR_SERVICE_DOES_NOT_EXIST,
-    ERROR_SERVICE_EXISTS, ERROR_SERVICE_MARKED_FOR_DELETE, ERROR_SERVICE_NOT_ACTIVE, GetLastError,
-    HANDLE, HLOCAL, LocalFree, NO_ERROR,
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BROKEN_PIPE, ERROR_FAILED_SERVICE_CONTROLLER_CONNECT,
+    ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_SERVICE_ALREADY_RUNNING,
+    ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_EXISTS, ERROR_SERVICE_MARKED_FOR_DELETE,
+    ERROR_SERVICE_NOT_ACTIVE, GetLastError, HANDLE, HLOCAL, LocalFree, NO_ERROR,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -24,13 +24,13 @@ use windows::Win32::System::Pipes::{
 use windows::Win32::System::Services::{
     ChangeServiceConfigW, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
     ENUM_SERVICE_TYPE, OpenSCManagerW, OpenServiceW, QueryServiceStatus,
-    RegisterServiceCtrlHandlerExW, SC_MANAGER_ALL_ACCESS, SERVICE_ACCEPT_SHUTDOWN,
-    SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START, SERVICE_CHANGE_CONFIG,
-    SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_ERROR, SERVICE_ERROR_NORMAL,
-    SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START, SERVICE_START_PENDING,
-    SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING, SERVICE_STOPPED,
-    SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
-    StartServiceW,
+    RegisterServiceCtrlHandlerExW, SC_MANAGER_ALL_ACCESS, SC_MANAGER_CONNECT,
+    SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CHANGE_CONFIG, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_ERROR,
+    SERVICE_ERROR_NORMAL, SERVICE_NO_CHANGE, SERVICE_QUERY_STATUS, SERVICE_RUNNING, SERVICE_START,
+    SERVICE_START_PENDING, SERVICE_STATUS, SERVICE_STATUS_HANDLE, SERVICE_STOP_PENDING,
+    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
+    StartServiceCtrlDispatcherW, StartServiceW,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -48,6 +48,14 @@ const PIPE_BUFFER_BYTES: u32 = 256 * 1024;
 static SHOULD_STOP: AtomicBool = AtomicBool::new(false);
 static SERVICE_STATUS_HANDLE_RAW: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartInstalledServiceOutcome {
+    NotInstalled,
+    AlreadyRunning,
+    Started,
+    RequiresElevation,
+}
 
 pub fn run_server_mode() -> Result<()> {
     xlog::info("server mode selected");
@@ -166,6 +174,122 @@ pub fn install_and_start_current_service() -> Result<()> {
         let _ = CloseServiceHandle(scm);
     }
     Ok(())
+}
+
+pub fn start_installed_service_if_stopped() -> Result<StartInstalledServiceOutcome> {
+    let scm = unsafe { OpenSCManagerW(None, None, SC_MANAGER_CONNECT) }
+        .context("OpenSCManagerW failed")?;
+
+    let service_name = to_wide(SERVICE_NAME);
+    let (service, can_start_directly) = match unsafe {
+        OpenServiceW(
+            scm,
+            PCWSTR(service_name.as_ptr()),
+            SERVICE_QUERY_STATUS | SERVICE_START,
+        )
+    } {
+        Ok(handle) => (handle, true),
+        Err(err) => {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_SERVICE_DOES_NOT_EXIST {
+                unsafe {
+                    let _ = CloseServiceHandle(scm);
+                }
+                xlog::info("service is not installed, skip startup auto-start");
+                return Ok(StartInstalledServiceOutcome::NotInstalled);
+            }
+            if code != ERROR_ACCESS_DENIED {
+                unsafe {
+                    let _ = CloseServiceHandle(scm);
+                }
+                return Err(err).context("OpenServiceW(auto-start check) failed");
+            }
+
+            match unsafe { OpenServiceW(scm, PCWSTR(service_name.as_ptr()), SERVICE_QUERY_STATUS) }
+            {
+                Ok(handle) => (handle, false),
+                Err(query_err) => {
+                    let query_code = unsafe { GetLastError() };
+                    unsafe {
+                        let _ = CloseServiceHandle(scm);
+                    }
+
+                    if query_code == ERROR_SERVICE_DOES_NOT_EXIST {
+                        xlog::info("service is not installed, skip startup auto-start");
+                        return Ok(StartInstalledServiceOutcome::NotInstalled);
+                    }
+                    if query_code == ERROR_ACCESS_DENIED {
+                        xlog::warn("service access denied on bootstrap, request elevated start");
+                        return Ok(StartInstalledServiceOutcome::RequiresElevation);
+                    }
+
+                    return Err(query_err)
+                        .context("OpenServiceW(query-only auto-start check) failed");
+                }
+            }
+        }
+    };
+
+    let mut status = SERVICE_STATUS::default();
+    if let Err(err) = unsafe { QueryServiceStatus(service, &mut status) } {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        return Err(err).context("QueryServiceStatus(auto-start check) failed");
+    }
+
+    if status.dwCurrentState == SERVICE_RUNNING || status.dwCurrentState == SERVICE_START_PENDING {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        xlog::info("service already running, skip startup auto-start");
+        return Ok(StartInstalledServiceOutcome::AlreadyRunning);
+    }
+
+    if !can_start_directly {
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        xlog::warn("service is installed but requires elevation to start");
+        return Ok(StartInstalledServiceOutcome::RequiresElevation);
+    }
+
+    let start_res = unsafe { StartServiceW(service, None) };
+    if let Err(err) = start_res {
+        let code = unsafe { GetLastError() };
+        if code == ERROR_SERVICE_ALREADY_RUNNING {
+            unsafe {
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+            }
+            xlog::info("service already running");
+            return Ok(StartInstalledServiceOutcome::AlreadyRunning);
+        }
+        if code == ERROR_ACCESS_DENIED {
+            unsafe {
+                let _ = CloseServiceHandle(service);
+                let _ = CloseServiceHandle(scm);
+            }
+            xlog::warn("service start needs elevation on bootstrap");
+            return Ok(StartInstalledServiceOutcome::RequiresElevation);
+        }
+
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
+        }
+        return Err(err).context("StartServiceW(auto-start check) failed");
+    }
+
+    unsafe {
+        let _ = CloseServiceHandle(service);
+        let _ = CloseServiceHandle(scm);
+    }
+    xlog::info("service is installed but not running, startup auto-start triggered");
+    Ok(StartInstalledServiceOutcome::Started)
 }
 
 pub fn start_current_service() -> Result<()> {
@@ -299,14 +423,13 @@ pub fn uninstall_current_service() -> Result<()> {
 
     let mut service_status = SERVICE_STATUS::default();
     if let Err(err) = unsafe { ControlService(service, SERVICE_CONTROL_STOP, &mut service_status) }
+        && unsafe { GetLastError() } != ERROR_SERVICE_NOT_ACTIVE
     {
-        if unsafe { GetLastError() } != ERROR_SERVICE_NOT_ACTIVE {
-            unsafe {
-                let _ = CloseServiceHandle(service);
-                let _ = CloseServiceHandle(scm);
-            }
-            return Err(err).context("ControlService(stop) failed");
+        unsafe {
+            let _ = CloseServiceHandle(service);
+            let _ = CloseServiceHandle(scm);
         }
+        return Err(err).context("ControlService(stop) failed");
     }
 
     for _ in 0..30 {

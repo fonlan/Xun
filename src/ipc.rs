@@ -130,6 +130,15 @@ impl IpcClient {
         Err(last_error.unwrap_or_else(|| anyhow!("ipc search retry failed without details")))
     }
 
+    pub fn check_initial_index_ready_quick(&self) -> Result<bool> {
+        let opened = self.open_pipe_quick()?;
+        let session = IpcSession { handle: opened };
+        let reply = self
+            .search_once_on_handle(session.handle, "", 1)
+            .context("status probe search failed")?;
+        Ok(reply.initial_index_ready)
+    }
+
     fn search_once_on_handle(
         &self,
         pipe: HANDLE,
@@ -198,6 +207,22 @@ impl IpcClient {
             SEARCH_PIPE_PATH,
             last_error.unwrap_or_else(|| "unknown error".to_string())
         ))
+    }
+
+    fn open_pipe_quick(&self) -> Result<HANDLE> {
+        let opened = unsafe {
+            CreateFileW(
+                PCWSTR(self.pipe_path_wide.as_ptr()),
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        }
+        .context("CreateFileW failed")?;
+        Ok(opened)
     }
 }
 
@@ -444,6 +469,10 @@ fn to_wide(input: &str) -> Vec<u16> {
         .encode_wide()
         .chain(iter::once(0))
         .collect()
+}
+
+pub fn is_service_unavailable_error(err: &anyhow::Error) -> bool {
+    is_retryable_pipe_error(err)
 }
 
 fn is_retryable_pipe_error(err: &anyhow::Error) -> bool {

@@ -14,6 +14,8 @@ mod xlog;
 
 use anyhow::Context;
 use app::XunApp;
+use server::StartInstalledServiceOutcome;
+use win::RunAsLaunchOutcome;
 
 fn main() -> anyhow::Result<()> {
     xlog::init_session();
@@ -100,6 +102,29 @@ fn main() -> anyhow::Result<()> {
     }
 
     xlog::info("startup mode: client");
+    match server::start_installed_service_if_stopped() {
+        Ok(StartInstalledServiceOutcome::NotInstalled)
+        | Ok(StartInstalledServiceOutcome::AlreadyRunning)
+        | Ok(StartInstalledServiceOutcome::Started) => {}
+        Ok(StartInstalledServiceOutcome::RequiresElevation) => {
+            match win::launch_start_service_elevated() {
+                Ok(RunAsLaunchOutcome::Started) => {}
+                Ok(RunAsLaunchOutcome::Cancelled) => {
+                    xlog::warn("startup auto-start cancelled by user at UAC prompt")
+                }
+                Err(err) => {
+                    xlog::warn(format!(
+                        "startup auto-start requires elevation, runas trigger failed: {err:#}"
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            xlog::warn(format!(
+                "startup auto-start service failed, continue as client only: {err:#}"
+            ));
+        }
+    }
     let app = XunApp::new()?;
     xlog::info("client app constructed, entering run loop");
     app.run()

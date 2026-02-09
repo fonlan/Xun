@@ -182,7 +182,7 @@ impl FileIndex {
                         }
                     }
 
-                    if inserted_this_volume > 0 && inserted_this_volume % 200_000 == 0 {
+                    if inserted_this_volume > 0 && inserted_this_volume.is_multiple_of(200_000) {
                         xlog::info(format!(
                             "volume {letter} insert progress={} elapsed_ms={}",
                             inserted_this_volume,
@@ -424,7 +424,7 @@ impl FileIndex {
                     }
                 }
 
-                if total_changes > 0 || tick % 20 == 0 {
+                if total_changes > 0 || tick.is_multiple_of(20) {
                     xlog::info(format!(
                         "usn tick={} applied_changes={} monitors={}",
                         tick,
@@ -533,7 +533,7 @@ fn scan_volume_from_usn_enum(volume: &VolumeInfo) -> Result<VolumeSnapshot> {
         }
 
         page += 1;
-        if page == 1 || page % 32 == 0 {
+        if page == 1 || page.is_multiple_of(32) {
             xlog::info(format!(
                 "FSCTL_ENUM_USN_DATA page volume {} page={} returned={}",
                 volume.letter, page, returned
@@ -695,17 +695,17 @@ fn build_full_path_cached(
 
 fn push_entry(inner: &mut IndexInner, entry: RawPath) {
     let key_hash = hash_key(entry.lower_path.as_bytes());
-    if let Some(existing_id) = inner.seen.get(&key_hash).copied() {
-        if let Some(existing_meta) = inner.files.get_mut(existing_id as usize) {
-            let existing_lower = decode_slice(&inner.arena, existing_meta.lower_path);
-            if existing_lower == entry.lower_path {
-                let new_path = inner.arena.push(entry.path.as_bytes());
-                let new_lower = inner.arena.push(entry.lower_path.as_bytes());
-                existing_meta.path = new_path;
-                existing_meta.lower_path = new_lower;
-                existing_meta.flags = entry.flags;
-                return;
-            }
+    if let Some(existing_id) = inner.seen.get(&key_hash).copied()
+        && let Some(existing_meta) = inner.files.get_mut(existing_id as usize)
+    {
+        let existing_lower = decode_slice(&inner.arena, existing_meta.lower_path);
+        if existing_lower == entry.lower_path {
+            let new_path = inner.arena.push(entry.path.as_bytes());
+            let new_lower = inner.arena.push(entry.lower_path.as_bytes());
+            existing_meta.path = new_path;
+            existing_meta.lower_path = new_lower;
+            existing_meta.flags = entry.flags;
+            return;
         }
     }
 
@@ -719,14 +719,14 @@ fn push_entry(inner: &mut IndexInner, entry: RawPath) {
         flags: entry.flags,
     });
 
-    if let Some(name) = basename(&entry.lower_path) {
-        if !name.is_empty() {
-            let name_bytes = name.as_bytes();
-            inner.trie.insert(name_bytes, id);
+    if let Some(name) = basename(&entry.lower_path)
+        && !name.is_empty()
+    {
+        let name_bytes = name.as_bytes();
+        inner.trie.insert(name_bytes, id);
 
-            for key in collect_trigram_keys(name_bytes) {
-                inner.trigrams.entry(key).or_default().push(id);
-            }
+        for key in collect_trigram_keys(name_bytes) {
+            inner.trigrams.entry(key).or_default().push(id);
         }
     }
 
@@ -970,7 +970,7 @@ impl Drop for UsnMonitor {
 fn usn_record_name(record: &USN_RECORD_V2, rec: &[u8]) -> Option<String> {
     let off = record.FileNameOffset as usize;
     let len = record.FileNameLength as usize;
-    if len == 0 || off + len > rec.len() || len % 2 != 0 {
+    if len == 0 || off + len > rec.len() || !len.is_multiple_of(2) {
         return None;
     }
 

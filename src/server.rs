@@ -524,6 +524,7 @@ fn handle_pipe_client(pipe: HANDLE, index: &FileIndex) -> Result<()> {
                 let results = index.search(query.as_str(), normalized_limit);
                 IpcResponse::SearchOk {
                     index_len: index.len() as u64,
+                    initial_index_ready: index.is_initial_index_ready(),
                     results,
                 }
             }

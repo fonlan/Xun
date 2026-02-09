@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -105,16 +106,19 @@ impl Default for IndexInner {
 
 pub struct FileIndex {
     inner: Arc<RwLock<IndexInner>>,
+    initial_index_ready: AtomicBool,
 }
 
 impl FileIndex {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(IndexInner::default())),
+            initial_index_ready: AtomicBool::new(false),
         }
     }
 
     pub fn start_indexing(&self) -> Result<()> {
+        self.initial_index_ready.store(false, Ordering::Release);
         xlog::info("start_indexing begin");
         let volumes = ntfs_volumes().context("failed to enumerate NTFS volumes")?;
         xlog::info(format!("ntfs_volumes found {} volume(s)", volumes.len()));
@@ -215,6 +219,7 @@ impl FileIndex {
 
         xlog::info("spawning usn monitors");
         self.spawn_usn_monitors(volumes);
+        self.initial_index_ready.store(true, Ordering::Release);
         xlog::info("start_indexing end");
         Ok(())
     }
@@ -351,6 +356,10 @@ impl FileIndex {
 
     pub fn len(&self) -> usize {
         self.inner.read().files.len()
+    }
+
+    pub fn is_initial_index_ready(&self) -> bool {
+        self.initial_index_ready.load(Ordering::Acquire)
     }
 
     fn spawn_usn_monitors(&self, volumes: Vec<VolumeInfo>) {

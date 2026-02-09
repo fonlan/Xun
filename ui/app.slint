@@ -40,6 +40,7 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: -1;
     in-out property <int> selected-filter-index: 0;
     in-out property <int> total-match-count: 0;
+    in-out property <bool> initial-index-ready: false;
     in-out property <length> results-viewport-y: 0px;
     in-out property <length> filter-viewport-x: 0px;
     out property <length> results-visible-height: root.results-panel-height - 8px - root.filter-bar-height;
@@ -101,7 +102,7 @@ export component AppWindow inherits Window {
 
             LineEdit {
                 text <=> root.query;
-                placeholder-text: "输入命令或文件名...";
+                placeholder-text: root.initial-index-ready ? "输入命令或文件名..." : "后台正在建立索引，输入后将逐步返回结果...";
                 font-family: "Microsoft YaHei UI";
                 font-size: 22px;
                 height: root.input-height;

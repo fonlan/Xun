@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use parking_lot::Mutex;
-use slint::{Image, Model, ModelRc, PhysicalPosition, VecModel};
 use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor, winit};
+use slint::{Image, Model, ModelRc, PhysicalPosition, VecModel};
 
 use crate::ipc::{IpcClient, IpcSession};
 use crate::model::{FileTypeFilter, SearchResult};
@@ -99,14 +99,14 @@ impl XunApp {
                         300,
                     );
                     let elapsed_ms = started.elapsed().as_millis();
-                    let (results, index_len) = match reply {
-                        Ok(reply) => (reply.results, reply.index_len),
+                    let (results, index_len, initial_index_ready) = match reply {
+                        Ok(reply) => (reply.results, reply.index_len, reply.initial_index_ready),
                         Err(err) => {
                             xlog::warn(format!(
                                 "query worker ipc failed seq={} query={:?}: {err:#}",
                                 seq, query_text
                             ));
-                            (Vec::new(), 0)
+                            (Vec::new(), 0, false)
                         }
                     };
 
@@ -136,6 +136,8 @@ impl XunApp {
                             xlog::warn("query apply ignored: window dropped");
                             return;
                         };
+
+                        window.set_initial_index_ready(initial_index_ready);
 
                         {
                             let mut guard = all_results_for_apply.lock();
@@ -400,6 +402,7 @@ impl XunApp {
                     window.set_results_viewport_y(0.0);
                     all_results_for_activate.lock().clear();
                     clear_result_icon_cache();
+                    window.set_initial_index_ready(false);
 
                     center_popup_window(&window);
 
@@ -421,6 +424,7 @@ impl XunApp {
         ui.set_results(ModelRc::new(VecModel::default()));
         ui.set_selected_filter_index(0);
         ui.set_total_match_count(0);
+        ui.set_initial_index_ready(false);
         center_popup_window(&ui);
         ui.show()?;
         center_popup_window(&ui);

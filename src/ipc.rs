@@ -35,6 +35,7 @@ const SEARCH_RETRY_DELAY_MS: u64 = 40;
 #[derive(Debug, Clone)]
 pub struct SearchReply {
     pub index_len: usize,
+    pub initial_index_ready: bool,
     pub results: Vec<SearchResult>,
 }
 
@@ -149,8 +150,13 @@ impl IpcClient {
         let response = decode_response(response_payload?.as_slice())?;
 
         match response {
-            IpcResponse::SearchOk { index_len, results } => Ok(SearchReply {
+            IpcResponse::SearchOk {
+                index_len,
+                initial_index_ready,
+                results,
+            } => Ok(SearchReply {
                 index_len: index_len as usize,
+                initial_index_ready,
                 results,
             }),
             IpcResponse::Error { message } => {
@@ -204,6 +210,7 @@ pub enum IpcRequest {
 pub enum IpcResponse {
     SearchOk {
         index_len: u64,
+        initial_index_ready: bool,
         results: Vec<SearchResult>,
     },
     Error {
@@ -251,9 +258,14 @@ pub fn encode_response(response: &IpcResponse) -> Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(1024);
 
     match response {
-        IpcResponse::SearchOk { index_len, results } => {
+        IpcResponse::SearchOk {
+            index_len,
+            initial_index_ready,
+            results,
+        } => {
             payload.push(SEARCH_RESPONSE_OK);
             payload.extend_from_slice(index_len.to_le_bytes().as_slice());
+            payload.push(if *initial_index_ready { 1 } else { 0 });
 
             let count = u32::try_from(results.len())
                 .map_err(|_| anyhow!("too many result rows: {}", results.len()))?;
@@ -280,6 +292,7 @@ pub fn decode_response(payload: &[u8]) -> Result<IpcResponse> {
     let response = match status {
         SEARCH_RESPONSE_OK => {
             let index_len = read_u64(payload, &mut cursor)?;
+            let initial_index_ready = read_u8(payload, &mut cursor)? != 0;
             let count = read_u32(payload, &mut cursor)? as usize;
             let mut results = Vec::with_capacity(count);
 
@@ -289,7 +302,11 @@ pub fn decode_response(payload: &[u8]) -> Result<IpcResponse> {
                 results.push(SearchResult { kind, path });
             }
 
-            IpcResponse::SearchOk { index_len, results }
+            IpcResponse::SearchOk {
+                index_len,
+                initial_index_ready,
+                results,
+            }
         }
         SEARCH_RESPONSE_ERROR => {
             let message = read_string(payload, &mut cursor)?;

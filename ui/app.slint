@@ -106,30 +106,71 @@ export component AppWindow inherits Window {
             padding: 14px;
             spacing: 12px;
 
-            query_input := LineEdit {
-                text <=> root.query;
-                placeholder-text: root.service-unavailable
-                    ? "服务端未启动"
-                    : (root.initial-index-ready ? "输入命令或文件名..." : "后台正在建立索引，输入后将逐步返回结果...");
-                font-family: "Microsoft YaHei UI";
-                font-size: 22px;
+            Rectangle {
                 height: root.input-height;
-                accepted => { root.submit(self.text); }
-                edited => { root.query-changed(self.text); }
-                key-pressed(event) => {
-                    if (event.text == Key.Escape) {
-                        root.esc-pressed();
-                        return accept;
+                horizontal-stretch: 1;
+                clip: true;
+                border-radius: 12px;
+                border-width: 1px;
+                border-color: #D8E8FF22;
+                background: #9FB7DB26;
+
+                Rectangle {
+                    x: 1px;
+                    y: 1px;
+                    width: max(0px, parent.width - 2px);
+                    height: max(0px, parent.height - 2px);
+                    border-radius: 11px;
+                    background: @linear-gradient(180deg, #FFFFFF24 0%, #90ACCE14 100%);
+                }
+
+                Text {
+                    x: 14px;
+                    width: max(0px, parent.width - 28px);
+                    height: parent.height;
+                    text: (query_input.text == "" && query_input.preedit-text == "")
+                        ? (root.service-unavailable
+                            ? "服务端未启动"
+                            : (root.initial-index-ready ? "输入命令或文件名..." : "后台正在建立索引，输入后将逐步返回结果..."))
+                        : "";
+                    font-family: "Microsoft YaHei UI";
+                    font-size: 22px;
+                    color: #9FB1CF;
+                    vertical-alignment: center;
+                    overflow: clip;
+                    accessible-role: none;
+                }
+
+                query_input := TextInput {
+                    x: 14px;
+                    width: max(1px, parent.width - 28px);
+                    height: parent.height;
+                    text <=> root.query;
+                    font-family: "Microsoft YaHei UI";
+                    font-size: 22px;
+                    color: #EAF0FF;
+                    selection-foreground-color: #EAF0FF;
+                    selection-background-color: #476BA0;
+                    vertical-alignment: center;
+                    single-line: true;
+
+                    accepted => { root.submit(self.text); }
+                    edited => { root.query-changed(self.text); }
+                    key-pressed(event) => {
+                        if (event.text == Key.Escape) {
+                            root.esc-pressed();
+                            return accept;
+                        }
+                        if (event.text == Key.UpArrow) {
+                            root.selection-up();
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            root.selection-down();
+                            return accept;
+                        }
+                        return reject;
                     }
-                    if (event.text == Key.UpArrow) {
-                        root.selection-up();
-                        return accept;
-                    }
-                    if (event.text == Key.DownArrow) {
-                        root.selection-down();
-                        return accept;
-                    }
-                    return reject;
                 }
             }
 
@@ -277,5 +318,4 @@ export component AppWindow inherits Window {
         }
     }
 }
-
 

@@ -74,10 +74,9 @@ export component AppWindow inherits Window {
         width: parent.width;
         height: parent.height;
         clip: true;
-        background: #161A22E8;
+        background: #111A29A6;
         border-radius: 14px;
-        border-width: 1px;
-        border-color: #3C4355;
+        border-width: 0px;
 
         TouchArea {
             width: parent.width;
@@ -111,9 +110,8 @@ export component AppWindow inherits Window {
                 horizontal-stretch: 1;
                 clip: true;
                 border-radius: 12px;
-                border-width: 1px;
-                border-color: #D8E8FF22;
-                background: #9FB7DB26;
+                border-width: 0px;
+                background: #111A2999;
 
                 Rectangle {
                     x: 1px;
@@ -121,7 +119,7 @@ export component AppWindow inherits Window {
                     width: max(0px, parent.width - 2px);
                     height: max(0px, parent.height - 2px);
                     border-radius: 11px;
-                    background: @linear-gradient(180deg, #FFFFFF24 0%, #90ACCE14 100%);
+                    background: @linear-gradient(180deg, #2A385244 0%, #1A263B5C 100%);
                 }
 
                 Text {
@@ -318,4 +316,3 @@ export component AppWindow inherits Window {
         }
     }
 }
-

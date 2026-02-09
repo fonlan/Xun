@@ -10,13 +10,13 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use parking_lot::Mutex;
 use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor, winit};
-use slint::{Image, Model, ModelRc, PhysicalPosition, VecModel};
+use slint::{Image, Model, ModelRc, PhysicalPosition, Timer, TimerMode, VecModel};
 
-use crate::ipc::{IpcClient, IpcSession};
+use crate::ipc::{IpcClient, IpcSession, is_service_unavailable_error};
 use crate::model::{FileTypeFilter, SearchResult};
 use crate::win::{
-    ShellBridge, cursor_position, execute_or_open, launcher_popup_position, load_file_icon_image,
-    monitor_scale_factor_for_cursor,
+    ShellBridge, cursor_position, execute_or_open, is_left_mouse_button_down,
+    launcher_popup_position, load_file_icon_image, monitor_scale_factor_for_cursor,
 };
 use crate::xlog;
 
@@ -37,6 +37,7 @@ thread_local! {
 pub struct XunApp {
     _ui: AppWindow,
     _bridge: ShellBridge,
+    _outside_click_timer: Timer,
 }
 
 impl XunApp {
@@ -99,14 +100,21 @@ impl XunApp {
                         300,
                     );
                     let elapsed_ms = started.elapsed().as_millis();
-                    let (results, index_len, initial_index_ready) = match reply {
-                        Ok(reply) => (reply.results, reply.index_len, reply.initial_index_ready),
+                    let (results, index_len, initial_index_ready, service_unavailable) = match reply
+                    {
+                        Ok(reply) => (
+                            reply.results,
+                            reply.index_len,
+                            reply.initial_index_ready,
+                            false,
+                        ),
                         Err(err) => {
+                            let service_unavailable = is_service_unavailable_error(&err);
                             xlog::warn(format!(
                                 "query worker ipc failed seq={} query={:?}: {err:#}",
                                 seq, query_text
                             ));
-                            (Vec::new(), 0, false)
+                            (Vec::new(), 0, false, service_unavailable)
                         }
                     };
 
@@ -137,6 +145,7 @@ impl XunApp {
                             return;
                         };
 
+                        window.set_service_unavailable(service_unavailable);
                         window.set_initial_index_ready(initial_index_ready);
 
                         {
@@ -301,16 +310,55 @@ impl XunApp {
 
         let weak = ui.as_weak();
         ui.window().on_winit_window_event(move |_window, event| {
-            if matches!(event, winit::event::WindowEvent::Focused(false)) {
-                if let Some(window) = weak.upgrade() {
-                    if window.window().is_visible() {
-                        let _ = window.hide();
-                        xlog::info("window hidden by focus loss");
-                    }
-                }
+            if matches!(event, winit::event::WindowEvent::Focused(false))
+                && let Some(window) = weak.upgrade()
+                && window.window().is_visible()
+            {
+                let _ = window.hide();
+                xlog::info("window hidden by focus loss");
             }
 
             WinitEventResult::Propagate
+        });
+
+        let outside_click_last_down = Arc::new(Mutex::new(false));
+        let outside_click_timer = Timer::default();
+        let weak = ui.as_weak();
+        outside_click_timer.start(TimerMode::Repeated, Duration::from_millis(20), move || {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+
+            if !window.window().is_visible() {
+                *outside_click_last_down.lock() = false;
+                return;
+            }
+
+            let is_down = is_left_mouse_button_down();
+            let mut last_down = outside_click_last_down.lock();
+            if *last_down || !is_down {
+                *last_down = is_down;
+                return;
+            }
+            *last_down = true;
+
+            let Some((cursor_x, cursor_y)) = cursor_position() else {
+                return;
+            };
+
+            let position = window.window().position();
+            let size = window.window().size();
+            let right = position.x + size.width as i32;
+            let bottom = position.y + size.height as i32;
+            let inside = cursor_x >= position.x
+                && cursor_x < right
+                && cursor_y >= position.y
+                && cursor_y < bottom;
+
+            if !inside {
+                let _ = window.hide();
+                xlog::info("window hidden by outside click");
+            }
         });
 
         let weak = ui.as_weak();
@@ -387,9 +435,11 @@ impl XunApp {
         });
 
         let weak = ui.as_weak();
+        let ipc_client_for_activate = ipc_client.clone();
         let all_results_for_activate = all_results.clone();
         let activate: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let weak = weak.clone();
+            let ipc_client_for_activate = ipc_client_for_activate.clone();
             let all_results_for_activate = all_results_for_activate.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(window) = weak.upgrade() {
@@ -402,12 +452,25 @@ impl XunApp {
                     window.set_results_viewport_y(0.0);
                     all_results_for_activate.lock().clear();
                     clear_result_icon_cache();
-                    window.set_initial_index_ready(false);
 
-                    center_popup_window(&window);
+                    match ipc_client_for_activate.check_initial_index_ready_quick() {
+                        Ok(initial_index_ready) => {
+                            window.set_service_unavailable(false);
+                            window.set_initial_index_ready(initial_index_ready);
+                            xlog::info(format!(
+                                "activate status refreshed service_unavailable=false initial_index_ready={initial_index_ready}"
+                            ));
+                        }
+                        Err(err) => {
+                            window.set_service_unavailable(true);
+                            window.set_initial_index_ready(false);
+                            xlog::warn(format!(
+                                "activate status refresh failed, mark service unavailable: {err:#}"
+                            ));
+                        }
+                    }
 
-                    let _ = window.show();
-                    center_popup_window(&window);
+                    show_and_focus_launcher_window(&window);
                     xlog::info("window shown and query reset");
                 }
             });
@@ -424,14 +487,24 @@ impl XunApp {
         ui.set_results(ModelRc::new(VecModel::default()));
         ui.set_selected_filter_index(0);
         ui.set_total_match_count(0);
-        ui.set_initial_index_ready(false);
+        match ipc_client.check_initial_index_ready_quick() {
+            Ok(initial_index_ready) => {
+                ui.set_service_unavailable(false);
+                ui.set_initial_index_ready(initial_index_ready);
+            }
+            Err(_) => {
+                ui.set_service_unavailable(true);
+                ui.set_initial_index_ready(false);
+            }
+        }
         center_popup_window(&ui);
         ui.show()?;
-        center_popup_window(&ui);
+        show_and_focus_launcher_window(&ui);
 
         Ok(Self {
             _ui: ui,
             _bridge: bridge,
+            _outside_click_timer: outside_click_timer,
         })
     }
 
@@ -597,6 +670,18 @@ fn center_popup_window(window: &AppWindow) {
         "center_popup_window physical_size=({}, {}) window_scale={} monitor_scale={} -> pos=({}, {})",
         win_width, win_height, scale, monitor_scale, x, y
     ));
+}
+
+fn show_and_focus_launcher_window(window: &AppWindow) {
+    if !window.window().is_visible() {
+        let _ = window.show();
+    }
+    center_popup_window(window);
+
+    window.window().with_winit_window(|winit_window| {
+        winit_window.focus_window();
+    });
+    window.invoke_focus_query_input();
 }
 
 fn query_debounce_duration(query: &str) -> Duration {

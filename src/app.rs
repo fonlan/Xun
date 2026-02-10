@@ -33,6 +33,9 @@ const QUERY_DEBOUNCE_THREE_TO_FOUR_CHARS_MS: u64 = 90;
 const QUERY_DEBOUNCE_LONG_QUERY_MS: u64 = 60;
 const RESULT_ICON_LOGICAL_SIZE_PX: u32 = 24;
 const RESULT_ICON_MIN_SOURCE_SIZE_PX: u32 = 32;
+const RESULT_ROW_FILL_BATCH_SIZE: usize = 16;
+const RESULT_ROW_FILL_INITIAL_BATCH_SIZE: usize = 8;
+const RESULT_ROW_FILL_INTERVAL_MS: u64 = 12;
 const MAX_RESULT_ICON_CACHE: usize = 4096;
 const MAX_RESULT_META_CACHE: usize = 4096;
 const OPENED_ITEM_HISTORY_FILE_NAME: &str = "opened-items.v1";
@@ -41,6 +44,7 @@ const MAX_OPENED_ITEM_HISTORY: usize = 2048;
 thread_local! {
     static RESULT_ICON_CACHE: RefCell<HashMap<String, Image>> = RefCell::new(HashMap::new());
     static RESULT_META_CACHE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static RESULT_ROW_FILL_STATE: RefCell<ResultRowFillState> = RefCell::new(ResultRowFillState::default());
 }
 
 #[derive(Clone)]
@@ -56,6 +60,16 @@ struct QueryDispatch {
     encoded_query: String,
     mode: SearchQueryMode,
 }
+
+#[derive(Default)]
+struct ResultRowFillState {
+    next_index: usize,
+    icon_source_size_px: u32,
+    paths: Vec<String>,
+    model: Option<ModelRc<ResultRow>>,
+}
+
+type ResultRowBatch = (ModelRc<ResultRow>, u32, usize, Vec<String>, usize);
 
 #[derive(Default)]
 struct OpenedItemHistory {
@@ -208,6 +222,7 @@ pub struct XunApp {
     _ui: AppWindow,
     _bridge: ShellBridge,
     _outside_click_timer: Timer,
+    _result_row_fill_timer: Timer,
 }
 
 impl XunApp {
@@ -221,6 +236,15 @@ impl XunApp {
         let all_results = Arc::new(Mutex::new(Vec::<SearchResult>::new()));
         let last_dispatched_query = Arc::new(Mutex::new(None::<(SearchQueryMode, String)>));
         let opened_item_history = Arc::new(Mutex::new(OpenedItemHistory::load()));
+
+        let result_row_fill_timer = Timer::default();
+        result_row_fill_timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(RESULT_ROW_FILL_INTERVAL_MS),
+            move || {
+                let _ = fill_result_rows_batch(RESULT_ROW_FILL_BATCH_SIZE);
+            },
+        );
 
         let weak_for_worker = ui.as_weak();
         let ipc_client_for_worker = ipc_client.clone();
@@ -375,6 +399,7 @@ impl XunApp {
                 all_results_for_query_clear.lock().clear();
                 clear_result_icon_cache();
                 clear_result_meta_cache();
+                clear_result_row_fill_state();
                 *last_dispatched_query_for_ui.lock() = None;
                 xlog::info("query_changed empty: cleared results");
                 return;
@@ -811,6 +836,7 @@ impl XunApp {
                     all_results_for_activate.lock().clear();
                     clear_result_icon_cache();
                     clear_result_meta_cache();
+                    clear_result_row_fill_state();
 
                     let previous_initial_index_ready = window.get_initial_index_ready();
                     match ipc_client_for_activate.check_initial_index_ready_quick() {
@@ -877,6 +903,7 @@ impl XunApp {
             _ui: ui,
             _bridge: bridge,
             _outside_click_timer: outside_click_timer,
+            _result_row_fill_timer: result_row_fill_timer,
         })
     }
 
@@ -913,20 +940,94 @@ fn apply_results_for_filter(
     for (_, _, item) in filtered {
         let path = item.path.clone();
         rows.push(ResultRow {
-            icon: icon_for_path(path.as_str(), icon_source_size_px),
+            icon: Image::default(),
             path: path.as_str().into(),
-            meta: meta_for_path(path.as_str()).into(),
+            meta: "".into(),
         });
         paths.push(path);
     }
 
     let row_count = rows.len();
-    window.set_results(ModelRc::new(VecModel::from(rows)));
+    let model = ModelRc::new(VecModel::from(rows));
+    window.set_results(model.clone());
     window.set_selected_index(if row_count > 0 { 0 } else { -1 });
     window.set_results_viewport_y(0.0);
-    *result_paths.lock() = paths;
+    *result_paths.lock() = paths.clone();
+
+    RESULT_ROW_FILL_STATE.with(|state_cell| {
+        let mut state = state_cell.borrow_mut();
+        state.next_index = 0;
+        state.icon_source_size_px = icon_source_size_px;
+        state.paths = paths;
+        state.model = Some(model);
+    });
+    let _ = fill_result_rows_batch(RESULT_ROW_FILL_INITIAL_BATCH_SIZE);
 
     row_count
+}
+
+fn fill_result_rows_batch(batch_size: usize) -> usize {
+    let Some((model, icon_source_size_px, start_index, batch_paths, total_count)) =
+        next_result_row_batch(batch_size)
+    else {
+        return 0;
+    };
+
+    let batch_count = batch_paths.len();
+    for (offset, path) in batch_paths.iter().enumerate() {
+        model.set_row_data(
+            start_index + offset,
+            ResultRow {
+                icon: icon_for_path(path.as_str(), icon_source_size_px),
+                path: path.as_str().into(),
+                meta: meta_for_path(path.as_str()).into(),
+            },
+        );
+    }
+
+    let next_index = start_index + batch_count;
+    if next_index >= total_count {
+        xlog::info(format!("result rows fully rendered count={total_count}"));
+    }
+
+    batch_count
+}
+
+fn next_result_row_batch(batch_size: usize) -> Option<ResultRowBatch> {
+    if batch_size == 0 {
+        return None;
+    }
+
+    RESULT_ROW_FILL_STATE.with(|state_cell| {
+        let mut state = state_cell.borrow_mut();
+        let model = state.model.clone()?;
+        if state.next_index >= state.paths.len() {
+            return None;
+        }
+
+        let start_index = state.next_index;
+        let end_index = (start_index + batch_size).min(state.paths.len());
+        state.next_index = end_index;
+
+        let batch_paths = state.paths[start_index..end_index].to_vec();
+        Some((
+            model,
+            state.icon_source_size_px,
+            start_index,
+            batch_paths,
+            state.paths.len(),
+        ))
+    })
+}
+
+fn clear_result_row_fill_state() {
+    RESULT_ROW_FILL_STATE.with(|state_cell| {
+        let mut state = state_cell.borrow_mut();
+        state.next_index = 0;
+        state.icon_source_size_px = 0;
+        state.paths.clear();
+        state.model = None;
+    });
 }
 
 fn record_opened_item(opened_item_history: &Arc<Mutex<OpenedItemHistory>>, path: &str) {

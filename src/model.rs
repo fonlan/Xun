@@ -5,6 +5,8 @@ use std::path::Path;
 
 use once_cell::sync::Lazy;
 
+const REGEX_QUERY_PREFIX: &str = "\u{1f}re\u{1f}";
+
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "msi", "bat", "cmd", "com", "ps1", "vbs", "scr"];
 const ARCHIVE_EXTENSIONS: &[&str] = &[
     "zip", "rar", "7z", "tar", "gz", "bz2", "xz", "tgz", "cab", "iso",
@@ -71,6 +73,26 @@ pub struct FileFlags {
 pub struct SearchResult {
     pub path: String,
     pub kind: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SearchQueryMode {
+    Wildcard,
+    Regex,
+}
+
+pub fn encode_search_query_payload(query: &str, mode: SearchQueryMode) -> String {
+    match mode {
+        SearchQueryMode::Wildcard => query.to_string(),
+        SearchQueryMode::Regex => format!("{REGEX_QUERY_PREFIX}{query}"),
+    }
+}
+
+pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, &str) {
+    if let Some(query) = payload.strip_prefix(REGEX_QUERY_PREFIX) {
+        return (SearchQueryMode::Regex, query);
+    }
+    (SearchQueryMode::Wildcard, payload)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -13,6 +13,7 @@ ntfs = "0.4"
 once_cell = "1"
 parking_lot = "0.12"
 rayon = "1"
+regex = "1"
 slint = { version = "1.15", default-features = false, features = ["compat-1-2", "backend-winit", "renderer-winit-skia", "std", "unstable-winit-030"] }
 
 [dependencies.windows]

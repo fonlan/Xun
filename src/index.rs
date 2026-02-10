@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use parking_lot::RwLock;
 use rayon::prelude::*;
+use regex::RegexBuilder;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, WIN32_ERROR};
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
@@ -21,7 +22,10 @@ use windows::Win32::System::Ioctl::{
 };
 
 use crate::arena::{ByteArena, SliceRef};
-use crate::model::{FileFlags, FileMeta, SearchResult, classify_path_kind};
+use crate::model::{
+    FileFlags, FileMeta, SearchQueryMode, SearchResult, classify_path_kind,
+    decode_search_query_payload,
+};
 use crate::win::{VolumeInfo, is_placeholder_attr, ntfs_volumes};
 use crate::xlog;
 
@@ -223,12 +227,97 @@ impl FileIndex {
         Ok(())
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    pub fn search(&self, query_payload: &str, limit: usize) -> Vec<SearchResult> {
+        let (mode, query) = decode_search_query_payload(query_payload);
+        match mode {
+            SearchQueryMode::Wildcard => self.search_wildcard(query, limit),
+            SearchQueryMode::Regex => self.search_regex(query, limit),
+        }
+    }
+
+    fn search_wildcard(&self, query: &str, limit: usize) -> Vec<SearchResult> {
         let normalized = query.trim().to_ascii_lowercase();
         if normalized.is_empty() {
             return Vec::new();
         }
 
+        if has_wildcard_operator(normalized.as_str()) {
+            return self.search_wildcard_pattern(normalized.as_str(), limit);
+        }
+
+        self.search_substring(normalized.as_str(), limit)
+    }
+
+    fn search_regex(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        let pattern = query.trim();
+        if pattern.is_empty() {
+            return Vec::new();
+        }
+
+        let regex = match RegexBuilder::new(pattern).case_insensitive(true).build() {
+            Ok(regex) => regex,
+            Err(err) => {
+                xlog::warn(format!(
+                    "regex query compile failed query={:?}: {err}",
+                    pattern
+                ));
+                return Vec::new();
+            }
+        };
+
+        let guard = self.inner.read();
+        let mut out = Vec::new();
+        for meta in guard.files.iter().rev() {
+            if out.len() >= limit {
+                break;
+            }
+
+            let lower_path =
+                std::str::from_utf8(guard.arena.get(meta.lower_path)).unwrap_or_default();
+            let file_name = basename(lower_path).unwrap_or(lower_path);
+            if !regex.is_match(lower_path) && !regex.is_match(file_name) {
+                continue;
+            }
+
+            let path = decode_slice(&guard.arena, meta.path);
+            out.push(SearchResult {
+                kind: classify_path_kind(&path).to_string(),
+                path,
+            });
+        }
+
+        out
+    }
+
+    fn search_wildcard_pattern(&self, pattern: &str, limit: usize) -> Vec<SearchResult> {
+        let pattern_bytes = pattern.as_bytes();
+        let guard = self.inner.read();
+        let mut out = Vec::new();
+
+        for meta in guard.files.iter().rev() {
+            if out.len() >= limit {
+                break;
+            }
+
+            let lower_path = guard.arena.get(meta.lower_path);
+            let file_name = basename_bytes(lower_path).unwrap_or(lower_path);
+            if !wildcard_is_match(pattern_bytes, lower_path)
+                && !wildcard_is_match(pattern_bytes, file_name)
+            {
+                continue;
+            }
+
+            let path = decode_slice(&guard.arena, meta.path);
+            out.push(SearchResult {
+                kind: classify_path_kind(&path).to_string(),
+                path,
+            });
+        }
+
+        out
+    }
+
+    fn search_substring(&self, normalized: &str, limit: usize) -> Vec<SearchResult> {
         let needle = normalized.as_bytes();
         let needle_len = needle.len();
         let guard = self.inner.read();
@@ -738,6 +827,63 @@ fn decode_slice(arena: &ByteArena, slice: SliceRef) -> String {
 
 fn basename(path: &str) -> Option<&str> {
     path.rsplit(['\\', '/']).next()
+}
+
+fn basename_bytes(path: &[u8]) -> Option<&[u8]> {
+    let mut start = 0usize;
+    for (index, ch) in path.iter().enumerate() {
+        if matches!(*ch, b'\\' | b'/') {
+            start = index + 1;
+        }
+    }
+    path.get(start..)
+}
+
+fn has_wildcard_operator(query: &str) -> bool {
+    query.as_bytes().iter().any(|ch| matches!(*ch, b'*' | b'?'))
+}
+
+fn wildcard_is_match(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    let mut pattern_index = 0usize;
+    let mut text_index = 0usize;
+    let mut star_index: Option<usize> = None;
+    let mut star_text_index = 0usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?' || pattern[pattern_index] == text[text_index])
+        {
+            pattern_index += 1;
+            text_index += 1;
+            continue;
+        }
+
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+            continue;
+        }
+
+        if let Some(star_pos) = star_index {
+            pattern_index = star_pos + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+            continue;
+        }
+
+        return false;
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {

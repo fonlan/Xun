@@ -16,7 +16,7 @@ use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor, win
 use slint::{Image, Model, ModelRc, PhysicalPosition, Timer, TimerMode, VecModel};
 
 use crate::ipc::{IpcClient, IpcSession, is_service_unavailable_error};
-use crate::model::{FileTypeFilter, SearchResult};
+use crate::model::{FileTypeFilter, SearchQueryMode, SearchResult, encode_search_query_payload};
 use crate::win::{
     ShellBridge, cursor_position, execute_or_open, is_left_mouse_button_down,
     launcher_popup_position, load_file_icon_image, monitor_scale_factor_for_cursor,
@@ -45,6 +45,14 @@ thread_local! {
 struct OpenedItemRecord {
     path: String,
     last_opened_ms: u128,
+}
+
+#[derive(Clone)]
+struct QueryDispatch {
+    seq: u64,
+    display_query: String,
+    encoded_query: String,
+    mode: SearchQueryMode,
 }
 
 #[derive(Default)]
@@ -205,11 +213,11 @@ impl XunApp {
         let ui = AppWindow::new()?;
         let ipc_client = Arc::new(IpcClient::new());
         let query_seq = Arc::new(AtomicU64::new(0));
-        let (query_tx, query_rx) = mpsc::channel::<(u64, String)>();
+        let (query_tx, query_rx) = mpsc::channel::<QueryDispatch>();
         let drag_state = Arc::new(Mutex::new(None::<(i32, i32, i32, i32)>));
         let result_paths = Arc::new(Mutex::new(Vec::<String>::new()));
         let all_results = Arc::new(Mutex::new(Vec::<SearchResult>::new()));
-        let last_dispatched_query = Arc::new(Mutex::new(None::<String>));
+        let last_dispatched_query = Arc::new(Mutex::new(None::<(SearchQueryMode, String)>));
         let opened_item_history = Arc::new(Mutex::new(OpenedItemHistory::load()));
 
         let weak_for_worker = ui.as_weak();
@@ -224,9 +232,9 @@ impl XunApp {
                 xlog::info("query worker thread started");
                 let mut ipc_session: Option<IpcSession> = None;
 
-                while let Ok((mut seq, mut query_text)) = query_rx.recv() {
+                while let Ok(mut dispatch) = query_rx.recv() {
                     let mut debounce_deadline =
-                        Instant::now() + query_debounce_duration(query_text.as_str());
+                        Instant::now() + query_debounce_duration(dispatch.display_query.as_str());
                     loop {
                         let now = Instant::now();
                         if now >= debounce_deadline {
@@ -236,11 +244,10 @@ impl XunApp {
                         match query_rx
                             .recv_timeout(debounce_deadline.saturating_duration_since(now))
                         {
-                            Ok((new_seq, new_query)) => {
-                                seq = new_seq;
-                                query_text = new_query;
+                            Ok(new_dispatch) => {
+                                dispatch = new_dispatch;
                                 debounce_deadline =
-                                    Instant::now() + query_debounce_duration(query_text.as_str());
+                                    Instant::now() + query_debounce_duration(dispatch.display_query.as_str());
                             }
                             Err(mpsc::RecvTimeoutError::Timeout) => break,
                             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -250,15 +257,14 @@ impl XunApp {
                         }
                     }
 
-                    while let Ok((new_seq, new_query)) = query_rx.try_recv() {
-                        seq = new_seq;
-                        query_text = new_query;
+                    while let Ok(new_dispatch) = query_rx.try_recv() {
+                        dispatch = new_dispatch;
                     }
 
                     let started = Instant::now();
                     let reply = ipc_client_for_worker.search_with_session(
                         &mut ipc_session,
-                        query_text.as_str(),
+                        dispatch.encoded_query.as_str(),
                         300,
                     );
                     let elapsed_ms = started.elapsed().as_millis();
@@ -273,17 +279,20 @@ impl XunApp {
                         Err(err) => {
                             let service_unavailable = is_service_unavailable_error(&err);
                             xlog::warn(format!(
-                                "query worker ipc failed seq={} query={:?}: {err:#}",
-                                seq, query_text
+                                "query worker ipc failed seq={} mode={} query={:?}: {err:#}",
+                                dispatch.seq,
+                                search_query_mode_label(dispatch.mode),
+                                dispatch.display_query
                             ));
                             (Vec::new(), 0, false, service_unavailable)
                         }
                     };
 
                     xlog::info(format!(
-                        "query worker done seq={} query={:?} matches={} elapsed_ms={} index_len={}",
-                        seq,
-                        query_text,
+                        "query worker done seq={} mode={} query={:?} matches={} elapsed_ms={} index_len={}",
+                        dispatch.seq,
+                        search_query_mode_label(dispatch.mode),
+                        dispatch.display_query,
                         results.len(),
                         elapsed_ms,
                         index_len
@@ -295,10 +304,12 @@ impl XunApp {
                     let all_results_for_apply = all_results_for_worker.clone();
                     let opened_item_history_for_apply = opened_item_history_for_worker.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if seq_guard.load(Ordering::Acquire) != seq {
+                        if seq_guard.load(Ordering::Acquire) != dispatch.seq {
                             xlog::info(format!(
-                                "query drop stale seq={} query={:?}",
-                                seq, query_text
+                                "query drop stale seq={} mode={} query={:?}",
+                                dispatch.seq,
+                                search_query_mode_label(dispatch.mode),
+                                dispatch.display_query
                             ));
                             return;
                         }
@@ -328,7 +339,7 @@ impl XunApp {
                         );
                         xlog::info(format!(
                             "set_results applied seq={} total={} shown={} filter={}",
-                            seq,
+                            dispatch.seq,
                             guard.len(),
                             row_count,
                             selected_filter.key()
@@ -367,25 +378,98 @@ impl XunApp {
                 return;
             }
 
+            let mode = if window.get_regex_mode() {
+                SearchQueryMode::Regex
+            } else {
+                SearchQueryMode::Wildcard
+            };
+
             {
                 let mut guard = last_dispatched_query_for_ui.lock();
-                if guard.as_deref() == Some(query_text.as_str()) {
+                if guard.as_ref() == Some(&(mode, query_text.clone())) {
                     xlog::info(format!(
-                        "query_changed duplicate ignored query={:?}",
+                        "query_changed duplicate ignored mode={} query={:?}",
+                        search_query_mode_label(mode),
                         query_text
                     ));
                     return;
                 }
-                *guard = Some(query_text.clone());
+                *guard = Some((mode, query_text.clone()));
             }
 
             let seq = seq_for_query.fetch_add(1, Ordering::AcqRel) + 1;
+            let dispatch = QueryDispatch {
+                seq,
+                display_query: query_text.clone(),
+                encoded_query: encode_search_query_payload(query_text.as_str(), mode),
+                mode,
+            };
 
-            xlog::info(format!("query dispatch seq={} query={:?}", seq, query_text));
+            xlog::info(format!(
+                "query dispatch seq={} mode={} query={:?}",
+                seq,
+                search_query_mode_label(mode),
+                query_text
+            ));
 
-            if query_tx_for_ui.send((seq, query_text)).is_err() {
+            if query_tx_for_ui.send(dispatch).is_err() {
                 xlog::error("query dispatch failed: worker channel closed");
                 *last_dispatched_query_for_ui.lock() = None;
+            }
+        });
+
+        let weak = ui.as_weak();
+        let seq_for_mode_toggle = query_seq.clone();
+        let query_tx_for_mode_toggle = query_tx.clone();
+        let last_dispatched_query_for_mode_toggle = last_dispatched_query.clone();
+        ui.on_regex_mode_toggled(move |enabled| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+
+            let mode = if enabled {
+                SearchQueryMode::Regex
+            } else {
+                SearchQueryMode::Wildcard
+            };
+            let query_text = window.get_query().to_string();
+            xlog::info(format!(
+                "query mode toggled mode={} query={:?}",
+                search_query_mode_label(mode),
+                query_text
+            ));
+
+            if query_text.trim().is_empty() {
+                *last_dispatched_query_for_mode_toggle.lock() = None;
+                return;
+            }
+
+            {
+                let mut guard = last_dispatched_query_for_mode_toggle.lock();
+                if guard.as_ref() == Some(&(mode, query_text.clone())) {
+                    return;
+                }
+                *guard = Some((mode, query_text.clone()));
+            }
+
+            let seq = seq_for_mode_toggle.fetch_add(1, Ordering::AcqRel) + 1;
+            let dispatch = QueryDispatch {
+                seq,
+                display_query: query_text.clone(),
+                encoded_query: encode_search_query_payload(query_text.as_str(), mode),
+                mode,
+            };
+
+            xlog::info(format!(
+                "query redispatch by mode toggle seq={} mode={} query={:?}",
+                seq,
+                search_query_mode_label(mode),
+                query_text
+            ));
+
+            if query_tx_for_mode_toggle.send(dispatch).is_err() {
+                xlog::error("query redispatch by mode toggle failed: worker channel closed");
+                *last_dispatched_query_for_mode_toggle.lock() = None;
             }
         });
 
@@ -635,6 +719,7 @@ impl XunApp {
                 if let Some(window) = weak.upgrade() {
                     xlog::info("activate callback invoked");
                     window.set_query("".into());
+                    window.set_regex_mode(false);
                     window.set_results(ModelRc::new(VecModel::default()));
                     window.set_selected_index(-1);
                     window.set_selected_filter_index(0);
@@ -945,6 +1030,13 @@ fn show_and_focus_launcher_window(window: &AppWindow) {
         winit_window.focus_window();
     });
     window.invoke_focus_query_input();
+}
+
+fn search_query_mode_label(mode: SearchQueryMode) -> &'static str {
+    match mode {
+        SearchQueryMode::Wildcard => "wildcard",
+        SearchQueryMode::Regex => "regex",
+    }
 }
 
 fn query_debounce_duration(query: &str) -> Duration {

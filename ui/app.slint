@@ -9,6 +9,12 @@ export struct ResultRow {
 export component AppWindow inherits Window {
     in property <length> popup-width: 960px;
     private property <length> input-height: 48px;
+    private property <length> query-padding-left: 14px;
+    private property <length> mode-toggle-width: 40px;
+    private property <length> mode-toggle-height: 28px;
+    private property <length> mode-toggle-right-gap: 10px;
+    private property <length> mode-toggle-input-gap: 8px;
+    private property <length> query-right-reserved: root.mode-toggle-width + root.mode-toggle-right-gap + root.mode-toggle-input-gap;
     private property <length> panel-padding: 14px;
     private property <length> filter-bar-height: 34px;
     private property <length> filter-item-spacing: 6px;
@@ -40,6 +46,7 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: -1;
     in-out property <int> selected-filter-index: 0;
     in-out property <int> total-match-count: 0;
+    in-out property <bool> regex-mode: false;
     in-out property <bool> initial-index-ready: false;
     in-out property <bool> service-unavailable: false;
     in-out property <length> results-viewport-y: 0px;
@@ -57,6 +64,7 @@ export component AppWindow inherits Window {
 
     callback query-changed(string);
     callback submit(string);
+    callback regex-mode-toggled(bool);
     callback item-activated(string);
     callback filter-selected(int);
     callback esc-pressed();
@@ -123,8 +131,8 @@ export component AppWindow inherits Window {
                 }
 
                 Text {
-                    x: 14px;
-                    width: max(0px, parent.width - 28px);
+                    x: root.query-padding-left;
+                    width: max(0px, parent.width - root.query-padding-left - root.query-right-reserved);
                     height: parent.height;
                     text: (query_input.text == "" && query_input.preedit-text == "")
                         ? (root.service-unavailable
@@ -140,8 +148,8 @@ export component AppWindow inherits Window {
                 }
 
                 query_input := TextInput {
-                    x: 14px;
-                    width: max(1px, parent.width - 28px);
+                    x: root.query-padding-left;
+                    width: max(1px, parent.width - root.query-padding-left - root.query-right-reserved);
                     height: parent.height;
                     text <=> root.query;
                     font-family: "Microsoft YaHei UI";
@@ -168,6 +176,43 @@ export component AppWindow inherits Window {
                             return accept;
                         }
                         return reject;
+                    }
+                }
+
+                Rectangle {
+                    x: parent.width - root.mode-toggle-width - root.mode-toggle-right-gap;
+                    y: (parent.height - root.mode-toggle-height) / 2;
+                    width: root.mode-toggle-width;
+                    height: root.mode-toggle-height;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.regex-mode
+                        ? #8B73C9
+                        : (mode_toggle_touch.has-hover ? #51607A99 : #3A425266);
+                    background: root.regex-mode
+                        ? #4A3B74
+                        : (mode_toggle_touch.has-hover ? #2C344599 : #232A3859);
+
+                    mode_toggle_touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.regex-mode = !root.regex-mode;
+                            root.regex-mode-toggled(root.regex-mode);
+                            root.focus-query-input();
+                        }
+                    }
+
+                    Text {
+                        text: ".*";
+                        font-family: "Microsoft YaHei UI";
+                        color: root.regex-mode
+                            ? #EAF0FF
+                            : (mode_toggle_touch.has-hover ? #8D9DBA : #74829D);
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
                     }
                 }
             }

@@ -1325,17 +1325,17 @@ fn center_popup_window(window: &AppWindow) {
     let scale = window.window().scale_factor().max(0.1);
     let monitor_scale = monitor_scale_factor_for_cursor().unwrap_or(scale).max(0.1);
 
-    let mut win_width = physical_size.width as i32;
-    let mut win_height = physical_size.height as i32;
+    let logical_target_w = window.get_popup_width().max(1.0);
+    let logical_target_h = window.get_popup_height().max(1.0);
 
-    let logical_fallback_w = (window.get_popup_width() * monitor_scale).round() as i32;
-    let logical_fallback_h = (window.get_popup_height() * monitor_scale).round() as i32;
+    let mut win_width = (logical_target_w * monitor_scale).round() as i32;
+    let mut win_height = (logical_target_h * monitor_scale).round() as i32;
 
-    if win_width < logical_fallback_w {
-        win_width = logical_fallback_w;
+    if win_width <= 0 {
+        win_width = physical_size.width as i32;
     }
-    if win_height < logical_fallback_h {
-        win_height = logical_fallback_h;
+    if win_height <= 0 {
+        win_height = physical_size.height as i32;
     }
 
     if win_width <= 0 || win_height <= 0 {
@@ -1349,8 +1349,17 @@ fn center_popup_window(window: &AppWindow) {
     let (x, y) = launcher_popup_position(win_width, win_height);
     window.window().set_position(PhysicalPosition::new(x, y));
     xlog::info(format!(
-        "center_popup_window physical_size=({}, {}) window_scale={} monitor_scale={} -> pos=({}, {})",
-        win_width, win_height, scale, monitor_scale, x, y
+        "center_popup_window current_physical_size=({}, {}) target_logical_size=({}, {}) target_physical_size=({}, {}) window_scale={} monitor_scale={} -> pos=({}, {})",
+        physical_size.width,
+        physical_size.height,
+        logical_target_w,
+        logical_target_h,
+        win_width,
+        win_height,
+        scale,
+        monitor_scale,
+        x,
+        y
     ));
 }
 

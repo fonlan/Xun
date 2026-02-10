@@ -32,7 +32,7 @@ const USN_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 #[derive(Default)]
 struct TrieNode {
-    children: HashMap<u8, usize>,
+    children: Vec<(u8, u32)>,
     postings: Vec<u32>,
 }
 
@@ -51,15 +51,21 @@ impl PrefixTrie {
     fn insert(&mut self, key: &[u8], item_id: u32) {
         let mut node_idx = 0usize;
         for &ch in key.iter().take(256) {
-            let next = if let Some(next) = self.nodes[node_idx].children.get(&ch).copied() {
-                next
-            } else {
-                let created = self.nodes.len();
-                self.nodes.push(TrieNode::default());
-                self.nodes[node_idx].children.insert(ch, created);
-                created
+            let child_lookup = self.nodes[node_idx]
+                .children
+                .binary_search_by_key(&ch, |(key, _)| *key);
+            let next = match child_lookup {
+                Ok(position) => self.nodes[node_idx].children[position].1,
+                Err(position) => {
+                    let created = self.nodes.len() as u32;
+                    self.nodes.push(TrieNode::default());
+                    self.nodes[node_idx]
+                        .children
+                        .insert(position, (ch, created));
+                    created
+                }
             };
-            node_idx = next;
+            node_idx = next as usize;
             self.nodes[node_idx].postings.push(item_id);
         }
     }
@@ -71,10 +77,13 @@ impl PrefixTrie {
 
         let mut node_idx = 0usize;
         for &ch in key.iter().take(256) {
-            let Some(next) = self.nodes[node_idx].children.get(&ch).copied() else {
+            let Ok(position) = self.nodes[node_idx]
+                .children
+                .binary_search_by_key(&ch, |(key, _)| *key)
+            else {
                 return Vec::new();
             };
-            node_idx = next;
+            node_idx = self.nodes[node_idx].children[position].1 as usize;
         }
 
         self.nodes[node_idx]
@@ -124,6 +133,7 @@ impl FileIndex {
         self.initial_index_ready.store(false, Ordering::Release);
         xlog::info("start_indexing begin");
         let volumes = ntfs_volumes().context("failed to enumerate NTFS volumes")?;
+        let mut monitor_seeds = Vec::<MonitorSeed>::new();
         xlog::info(format!("ntfs_volumes found {} volume(s)", volumes.len()));
         if !volumes.is_empty() {
             let letters = volumes
@@ -150,34 +160,54 @@ impl FileIndex {
                     "volume {letter} snapshot tree_nodes={}",
                     snapshot.tree.len()
                 ));
+                {
+                    let mut inserted_this_volume = 0usize;
+                    let mut pending = Vec::with_capacity(4096);
+                    let started = Instant::now();
 
-                let mut inserted_this_volume = 0usize;
-                let mut pending = Vec::with_capacity(4096);
-                let started = Instant::now();
+                    let tree = &snapshot.tree;
+                    let cacheable_nodes = tree
+                        .values()
+                        .filter_map(|node| node.parent)
+                        .collect::<HashSet<u64>>();
+                    let mut path_cache = HashMap::<u64, String>::with_capacity(
+                        (cacheable_nodes.len() / 2).max(1_024),
+                    );
 
-                let tree = &snapshot.tree;
-                let cacheable_nodes = tree
-                    .values()
-                    .filter_map(|node| node.parent)
-                    .collect::<HashSet<u64>>();
-                let mut path_cache =
-                    HashMap::<u64, String>::with_capacity((cacheable_nodes.len() / 2).max(1_024));
+                    for frn in tree.keys().copied() {
+                        let Some(path) = build_full_path_cached(
+                            letter,
+                            frn,
+                            tree,
+                            &cacheable_nodes,
+                            &mut path_cache,
+                        ) else {
+                            continue;
+                        };
+                        let flags = tree.get(&frn).map(|n| n.flags).unwrap_or_default();
 
-                for frn in tree.keys().copied() {
-                    let Some(path) = build_full_path_cached(
-                        letter,
-                        frn,
-                        tree,
-                        &cacheable_nodes,
-                        &mut path_cache,
-                    ) else {
-                        continue;
-                    };
-                    let flags = tree.get(&frn).map(|n| n.flags).unwrap_or_default();
+                        pending.push(RawPath { path, flags });
 
-                    pending.push(RawPath { path, flags });
+                        if pending.len() >= 4096 {
+                            let mut guard = self.inner.write();
+                            for entry in pending.drain(..) {
+                                push_entry(&mut guard, entry);
+                                indexed_count += 1;
+                                inserted_this_volume += 1;
+                            }
+                        }
 
-                    if pending.len() >= 4096 {
+                        if inserted_this_volume > 0 && inserted_this_volume.is_multiple_of(200_000)
+                        {
+                            xlog::info(format!(
+                                "volume {letter} insert progress={} elapsed_ms={}",
+                                inserted_this_volume,
+                                started.elapsed().as_millis()
+                            ));
+                        }
+                    }
+
+                    if !pending.is_empty() {
                         let mut guard = self.inner.write();
                         for entry in pending.drain(..) {
                             push_entry(&mut guard, entry);
@@ -186,29 +216,31 @@ impl FileIndex {
                         }
                     }
 
-                    if inserted_this_volume > 0 && inserted_this_volume.is_multiple_of(200_000) {
+                    xlog::info(format!(
+                        "volume {letter} insert done={} elapsed_ms={}",
+                        inserted_this_volume,
+                        started.elapsed().as_millis()
+                    ));
+
+                    {
+                        let guard = self.inner.read();
                         xlog::info(format!(
-                            "volume {letter} insert progress={} elapsed_ms={}",
-                            inserted_this_volume,
-                            started.elapsed().as_millis()
+                            "memory stats after volume {letter}: files={} trie_nodes={} trigrams={} seen={} arena_len_mb={} arena_cap_mb={}",
+                            guard.files.len(),
+                            guard.trie.nodes.len(),
+                            guard.trigrams.len(),
+                            guard.seen.len(),
+                            guard.arena.len() / (1024 * 1024),
+                            guard.arena.capacity() / (1024 * 1024)
                         ));
                     }
                 }
 
-                if !pending.is_empty() {
-                    let mut guard = self.inner.write();
-                    for entry in pending.drain(..) {
-                        push_entry(&mut guard, entry);
-                        indexed_count += 1;
-                        inserted_this_volume += 1;
-                    }
-                }
-
-                xlog::info(format!(
-                    "volume {letter} insert done={} elapsed_ms={}",
-                    inserted_this_volume,
-                    started.elapsed().as_millis()
-                ));
+                monitor_seeds.push(MonitorSeed {
+                    volume: *volume,
+                    snapshot,
+                });
+                xlog::info(format!("monitor seed prepared volume {letter}"));
             }
 
             let guard = self.inner.read();
@@ -218,11 +250,19 @@ impl FileIndex {
                 indexed_count,
                 volumes.len()
             ));
-            xlog::info(format!("inner.files len={}", guard.files.len()));
+            xlog::info(format!(
+                "inner stats: files={} trie_nodes={} trigrams={} seen={} arena_len_mb={} arena_cap_mb={}",
+                guard.files.len(),
+                guard.trie.nodes.len(),
+                guard.trigrams.len(),
+                guard.seen.len(),
+                guard.arena.len() / (1024 * 1024),
+                guard.arena.capacity() / (1024 * 1024)
+            ));
         }
 
         xlog::info("spawning usn monitors");
-        self.spawn_usn_monitors(volumes);
+        self.spawn_usn_monitors(monitor_seeds);
         self.initial_index_ready.store(true, Ordering::Release);
         xlog::info("start_indexing end");
         Ok(())
@@ -567,29 +607,17 @@ impl FileIndex {
         self.initial_index_ready.load(Ordering::Acquire)
     }
 
-    fn spawn_usn_monitors(&self, volumes: Vec<VolumeInfo>) {
+    fn spawn_usn_monitors(&self, seeds: Vec<MonitorSeed>) {
         let inner = self.inner.clone();
 
         thread::spawn(move || {
-            xlog::info(format!(
-                "usn monitor thread start, volumes={}",
-                volumes.len()
-            ));
-            let mut monitors = volumes
-                .into_iter()
-                .filter_map(|volume| {
-                    let letter = volume.letter;
-                    let snapshot = match scan_volume_from_mft(&volume) {
-                        Ok(snapshot) => snapshot,
-                        Err(err) => {
-                            xlog::warn(format!(
-                                "monitor init skip volume {letter}: snapshot failed: {err:#}"
-                            ));
-                            return None;
-                        }
-                    };
+            xlog::info(format!("usn monitor thread start, seeds={}", seeds.len()));
 
-                    let monitor = match UsnMonitor::new(volume, snapshot) {
+            let mut monitors = seeds
+                .into_iter()
+                .filter_map(|seed| {
+                    let letter = seed.volume.letter;
+                    let monitor = match UsnMonitor::new(seed.volume, seed.snapshot) {
                         Ok(monitor) => monitor,
                         Err(err) => {
                             xlog::warn(format!(
@@ -620,8 +648,6 @@ impl FileIndex {
                         continue;
                     }
 
-                    xlog::info(format!("volume {letter} changes={}", changes.len()));
-
                     let mut guard = inner.write();
                     for entry in changes {
                         push_entry(&mut guard, entry);
@@ -629,7 +655,7 @@ impl FileIndex {
                     }
                 }
 
-                if total_changes > 0 || tick.is_multiple_of(20) {
+                if tick.is_multiple_of(120) {
                     xlog::info(format!(
                         "usn tick={} applied_changes={} monitors={}",
                         tick,
@@ -648,6 +674,11 @@ impl FileIndex {
 struct RawPath {
     path: String,
     flags: FileFlags,
+}
+
+struct MonitorSeed {
+    volume: VolumeInfo,
+    snapshot: VolumeSnapshot,
 }
 
 struct VolumeSnapshot {
@@ -1282,14 +1313,6 @@ impl UsnMonitor {
             }
 
             offset += len;
-        }
-
-        if !out.is_empty() {
-            xlog::info(format!(
-                "read_changes volume {} produced {} path(s)",
-                self.volume.letter,
-                out.len()
-            ));
         }
 
         Ok(out)

@@ -23,6 +23,14 @@ impl ByteArena {
         let range = ptr.range();
         &self.bytes[range]
     }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

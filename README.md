@@ -88,7 +88,11 @@ cargo clippy --all-targets -- -D warnings
 
 ## 日志与排障
 
-- 日志文件：`%AppData%\Xun\logs\xun-YYYY-MM-DD.log`（按日期分割）
+- 日志文件（按日期分割）：
+  - 客户端：`%AppData%\Xun\logs\xun-YYYY-MM-DD.log`
+  - 服务端（`--server`）：`%ProgramData%\Xun\logs\xun-YYYY-MM-DD.log`
+  - 自动清理：启动时清理旧日志，仅保留最近 7 天
+  - 若首选目录不可用，自动回退临时目录
 - 历史配置：`%AppData%\Xun\config\opened-items.v1`（记录曾打开项，用于结果置顶）
 - 如果检索无结果，优先检查：
   - 服务是否已安装并运行

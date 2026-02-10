@@ -28,7 +28,12 @@ fn ensure_mode_elevated(mode_flag: &str) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
-    xlog::init_session();
+    let is_server_scope = std::env::args().skip(1).any(|arg| arg == "--server");
+    xlog::init_session(if is_server_scope {
+        xlog::LogScope::Server
+    } else {
+        xlog::LogScope::Client
+    });
     xlog::info("bootstrap start");
 
     let mut install_service_mode = false;

@@ -59,7 +59,6 @@ fn build_extension_kind_map() -> HashMap<&'static str, FileTypeFilter> {
 #[derive(Clone, Copy, Debug)]
 pub struct FileMeta {
     pub path: SliceRef,
-    pub lower_path: SliceRef,
     pub flags: FileFlags,
 }
 

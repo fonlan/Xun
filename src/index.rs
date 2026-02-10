@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use parking_lot::RwLock;
-use rayon::prelude::*;
 use regex::RegexBuilder;
 use windows::Win32::Foundation::{CloseHandle, GetLastError, WIN32_ERROR};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -135,15 +134,11 @@ impl FileIndex {
             xlog::info(format!("volumes={letters}"));
         }
 
-        let snapshots = volumes
-            .par_iter()
-            .map(|volume| (volume.letter, scan_volume_from_mft(volume)))
-            .collect::<Vec<(char, Result<VolumeSnapshot>)>>();
-
         {
             let mut indexed_count = 0usize;
-            for (letter, snapshot) in snapshots {
-                let snapshot = match snapshot {
+            for volume in &volumes {
+                let letter = volume.letter;
+                let snapshot = match scan_volume_from_mft(volume) {
                     Ok(snapshot) => snapshot,
                     Err(err) => {
                         xlog::warn(format!("skip volume {letter}: {err:#}"));
@@ -161,20 +156,26 @@ impl FileIndex {
                 let started = Instant::now();
 
                 let tree = &snapshot.tree;
-                let mut path_cache = HashMap::<u64, Option<String>>::with_capacity(tree.len() / 2);
+                let cacheable_nodes = tree
+                    .values()
+                    .filter_map(|node| node.parent)
+                    .collect::<HashSet<u64>>();
+                let mut path_cache =
+                    HashMap::<u64, String>::with_capacity((cacheable_nodes.len() / 2).max(1_024));
 
                 for frn in tree.keys().copied() {
-                    let Some(path) = build_full_path_cached(letter, frn, tree, &mut path_cache)
-                    else {
+                    let Some(path) = build_full_path_cached(
+                        letter,
+                        frn,
+                        tree,
+                        &cacheable_nodes,
+                        &mut path_cache,
+                    ) else {
                         continue;
                     };
                     let flags = tree.get(&frn).map(|n| n.flags).unwrap_or_default();
 
-                    pending.push(RawPath {
-                        lower_path: path.to_ascii_lowercase(),
-                        path,
-                        flags,
-                    });
+                    pending.push(RawPath { path, flags });
 
                     if pending.len() >= 4096 {
                         let mut guard = self.inner.write();
@@ -314,17 +315,15 @@ impl FileIndex {
                     path,
                 });
             } else {
-                let lower_path =
-                    std::str::from_utf8(guard.arena.get(meta.lower_path)).unwrap_or_default();
-                let file_name = basename(lower_path).unwrap_or(lower_path);
-                if !regex.is_match(file_name) && (full_path && !regex.is_match(lower_path)) {
+                let path = std::str::from_utf8(guard.arena.get(meta.path)).unwrap_or_default();
+                let file_name = basename(path).unwrap_or(path);
+                if !regex.is_match(file_name) && (full_path && !regex.is_match(path)) {
                     continue;
                 }
 
-                let path = decode_slice(&guard.arena, meta.path);
                 out.push(SearchResult {
-                    kind: classify_path_kind(&path).to_string(),
-                    path,
+                    kind: classify_path_kind(path).to_string(),
+                    path: path.to_string(),
                 });
             }
         }
@@ -380,10 +379,10 @@ impl FileIndex {
                 break;
             }
 
-            let lower_path = guard.arena.get(meta.lower_path);
-            let file_name = basename_bytes(lower_path).unwrap_or(lower_path);
-            if !wildcard_is_match(pattern_bytes, file_name)
-                && (full_path && !wildcard_is_match(pattern_bytes, lower_path))
+            let path = guard.arena.get(meta.path);
+            let file_name = basename_bytes(path).unwrap_or(path);
+            if !wildcard_is_match_case_insensitive(pattern_bytes, file_name)
+                && (full_path && !wildcard_is_match_case_insensitive(pattern_bytes, path))
             {
                 continue;
             }
@@ -458,8 +457,8 @@ impl FileIndex {
                     break;
                 }
 
-                let lower = guard.arena.get(meta.lower_path);
-                if !contains_subslice(lower, needle) {
+                let path = guard.arena.get(meta.path);
+                if !contains_subslice_case_insensitive(path, needle) {
                     continue;
                 }
 
@@ -482,9 +481,9 @@ impl FileIndex {
                 let Some(meta) = guard.files.get(id as usize).copied() else {
                     continue;
                 };
-                let lower = guard.arena.get(meta.lower_path);
-                let file_name = basename_bytes(lower).unwrap_or(lower);
-                if !contains_subslice(file_name, needle) {
+                let path = guard.arena.get(meta.path);
+                let file_name = basename_bytes(path).unwrap_or(path);
+                if !contains_subslice_case_insensitive(file_name, needle) {
                     continue;
                 }
 
@@ -540,9 +539,9 @@ impl FileIndex {
                             let Some(meta) = guard.files.get(id as usize).copied() else {
                                 continue;
                             };
-                            let lower = guard.arena.get(meta.lower_path);
-                            let file_name = basename_bytes(lower).unwrap_or(lower);
-                            if !contains_subslice(file_name, needle) {
+                            let path = guard.arena.get(meta.path);
+                            let file_name = basename_bytes(path).unwrap_or(path);
+                            if !contains_subslice_case_insensitive(file_name, needle) {
                                 continue;
                             }
 
@@ -648,7 +647,6 @@ impl FileIndex {
 #[derive(Clone)]
 struct RawPath {
     path: String,
-    lower_path: String,
     flags: FileFlags,
 }
 
@@ -833,10 +831,11 @@ fn build_full_path_cached(
     letter: char,
     frn: u64,
     tree: &HashMap<u64, Node>,
-    cache: &mut HashMap<u64, Option<String>>,
+    cacheable_nodes: &HashSet<u64>,
+    cache: &mut HashMap<u64, String>,
 ) -> Option<String> {
     if let Some(cached) = cache.get(&frn) {
-        return cached.clone();
+        return Some(cached.clone());
     }
 
     let mut chain = Vec::<u64>::new();
@@ -849,23 +848,23 @@ fn build_full_path_cached(
         }
 
         if let Some(cached) = cache.get(&current) {
-            if let Some(base) = cached {
-                let mut full = base.clone();
-                for node_id in chain.iter().rev() {
-                    let Some(node) = tree.get(node_id) else {
-                        continue;
-                    };
-                    if !node.name.is_empty() && node.name != "." && node.name != ".." {
-                        if !full.ends_with('\\') {
-                            full.push('\\');
-                        }
-                        full.push_str(&node.name);
+            let mut full = cached.clone();
+            for node_id in chain.iter().rev() {
+                let Some(node) = tree.get(node_id) else {
+                    continue;
+                };
+                if !node.name.is_empty() && node.name != "." && node.name != ".." {
+                    if !full.ends_with('\\') {
+                        full.push('\\');
                     }
+                    full.push_str(&node.name);
                 }
-                cache.insert(frn, Some(full.clone()));
-                return Some(full);
             }
-            break;
+
+            if cacheable_nodes.contains(&frn) {
+                cache.insert(frn, full.clone());
+            }
+            return Some(full);
         }
 
         chain.push(current);
@@ -890,48 +889,47 @@ fn build_full_path_cached(
     }
 
     if parts.is_empty() {
-        cache.insert(frn, None);
         return None;
     }
 
     let full = format!("{}:\\{}", letter, parts.join("\\"));
-    cache.insert(frn, Some(full.clone()));
+    if cacheable_nodes.contains(&frn) {
+        cache.insert(frn, full.clone());
+    }
     Some(full)
 }
 
 fn push_entry(inner: &mut IndexInner, entry: RawPath) {
-    let key_hash = hash_key(entry.lower_path.as_bytes());
+    let key_hash = hash_key_ascii_lower(entry.path.as_bytes());
     if let Some(existing_id) = inner.seen.get(&key_hash).copied()
         && let Some(existing_meta) = inner.files.get_mut(existing_id as usize)
+        && eq_ascii_case_insensitive(inner.arena.get(existing_meta.path), entry.path.as_bytes())
     {
-        let existing_lower = decode_slice(&inner.arena, existing_meta.lower_path);
-        if existing_lower == entry.lower_path {
-            let new_path = inner.arena.push(entry.path.as_bytes());
-            let new_lower = inner.arena.push(entry.lower_path.as_bytes());
-            existing_meta.path = new_path;
-            existing_meta.lower_path = new_lower;
-            existing_meta.flags = entry.flags;
-            return;
-        }
+        let new_path = inner.arena.push(entry.path.as_bytes());
+        existing_meta.path = new_path;
+        existing_meta.flags = entry.flags;
+        return;
     }
 
     let id = inner.files.len() as u32;
     let path_ref = inner.arena.push(entry.path.as_bytes());
-    let lower_ref = inner.arena.push(entry.lower_path.as_bytes());
 
     inner.files.push(FileMeta {
         path: path_ref,
-        lower_path: lower_ref,
         flags: entry.flags,
     });
 
-    if let Some(name) = basename(&entry.lower_path)
+    if let Some(name) = basename(&entry.path)
         && !name.is_empty()
     {
-        let name_bytes = name.as_bytes();
-        inner.trie.insert(name_bytes, id);
+        let lowered = name
+            .as_bytes()
+            .iter()
+            .map(|&byte| ascii_lower(byte))
+            .collect::<Vec<_>>();
+        inner.trie.insert(&lowered, id);
 
-        for key in collect_trigram_keys(name_bytes) {
+        for key in collect_trigram_keys(&lowered) {
             inner.trigrams.entry(key).or_default().push(id);
         }
     }
@@ -1016,10 +1014,88 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         .any(|window| window == needle)
 }
 
-fn hash_key(value: &[u8]) -> u64 {
+fn ascii_lower(byte: u8) -> u8 {
+    if byte.is_ascii_uppercase() {
+        byte + 32
+    } else {
+        byte
+    }
+}
+
+fn wildcard_is_match_case_insensitive(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    let mut pattern_index = 0usize;
+    let mut text_index = 0usize;
+    let mut star_index: Option<usize> = None;
+    let mut star_text_index = 0usize;
+
+    while text_index < text.len() {
+        if pattern_index < pattern.len()
+            && (pattern[pattern_index] == b'?'
+                || pattern[pattern_index] == ascii_lower(text[text_index]))
+        {
+            pattern_index += 1;
+            text_index += 1;
+            continue;
+        }
+
+        if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+            star_index = Some(pattern_index);
+            pattern_index += 1;
+            star_text_index = text_index;
+            continue;
+        }
+
+        if let Some(star_pos) = star_index {
+            pattern_index = star_pos + 1;
+            star_text_index += 1;
+            text_index = star_text_index;
+            continue;
+        }
+
+        return false;
+    }
+
+    while pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+        pattern_index += 1;
+    }
+
+    pattern_index == pattern.len()
+}
+
+fn contains_subslice_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+
+    haystack.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(&lhs, &rhs)| ascii_lower(lhs) == rhs)
+    })
+}
+
+fn hash_key_ascii_lower(value: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
+    for &byte in value {
+        ascii_lower(byte).hash(&mut hasher);
+    }
     hasher.finish()
+}
+
+fn eq_ascii_case_insensitive(lhs: &[u8], rhs: &[u8]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs.iter())
+            .all(|(&left, &right)| ascii_lower(left) == ascii_lower(right))
 }
 
 fn collect_trigram_keys(bytes: &[u8]) -> Vec<u32> {
@@ -1200,11 +1276,7 @@ impl UsnMonitor {
 
                     if let Some(path) = build_full_path(self.volume.letter, frn, &self.tree) {
                         let flags = self.tree.get(&frn).map(|n| n.flags).unwrap_or_default();
-                        out.push(RawPath {
-                            lower_path: path.to_ascii_lowercase(),
-                            path,
-                            flags,
-                        });
+                        out.push(RawPath { path, flags });
                     }
                 }
             }

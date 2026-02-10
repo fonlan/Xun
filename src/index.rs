@@ -228,14 +228,32 @@ impl FileIndex {
     }
 
     pub fn search(&self, query_payload: &str, limit: usize) -> Vec<SearchResult> {
-        let (mode, query) = decode_search_query_payload(query_payload);
+        let (mode, case_sensitive, query) = decode_search_query_payload(query_payload);
         match mode {
-            SearchQueryMode::Wildcard => self.search_wildcard(query, limit),
-            SearchQueryMode::Regex => self.search_regex(query, limit),
+            SearchQueryMode::Wildcard => self.search_wildcard(query, limit, case_sensitive),
+            SearchQueryMode::Regex => self.search_regex(query, limit, case_sensitive),
         }
     }
 
-    fn search_wildcard(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    fn search_wildcard(
+        &self,
+        query: &str,
+        limit: usize,
+        case_sensitive: bool,
+    ) -> Vec<SearchResult> {
+        if case_sensitive {
+            let pattern = query.trim();
+            if pattern.is_empty() {
+                return Vec::new();
+            }
+
+            if has_wildcard_operator(pattern) {
+                return self.search_wildcard_pattern_case_sensitive(pattern, limit);
+            }
+
+            return self.search_substring_case_sensitive(pattern, limit);
+        }
+
         let normalized = query.trim().to_ascii_lowercase();
         if normalized.is_empty() {
             return Vec::new();
@@ -248,13 +266,16 @@ impl FileIndex {
         self.search_substring(normalized.as_str(), limit)
     }
 
-    fn search_regex(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    fn search_regex(&self, query: &str, limit: usize, case_sensitive: bool) -> Vec<SearchResult> {
         let pattern = query.trim();
         if pattern.is_empty() {
             return Vec::new();
         }
 
-        let regex = match RegexBuilder::new(pattern).case_insensitive(true).build() {
+        let regex = match RegexBuilder::new(pattern)
+            .case_insensitive(!case_sensitive)
+            .build()
+        {
             Ok(regex) => regex,
             Err(err) => {
                 xlog::warn(format!(
@@ -272,14 +293,59 @@ impl FileIndex {
                 break;
             }
 
-            let lower_path =
-                std::str::from_utf8(guard.arena.get(meta.lower_path)).unwrap_or_default();
-            let file_name = basename(lower_path).unwrap_or(lower_path);
-            if !regex.is_match(lower_path) && !regex.is_match(file_name) {
-                continue;
+            if case_sensitive {
+                let path = decode_slice(&guard.arena, meta.path);
+                let file_name = basename(path.as_str()).unwrap_or(path.as_str());
+                if !regex.is_match(path.as_str()) && !regex.is_match(file_name) {
+                    continue;
+                }
+
+                out.push(SearchResult {
+                    kind: classify_path_kind(&path).to_string(),
+                    path,
+                });
+            } else {
+                let lower_path =
+                    std::str::from_utf8(guard.arena.get(meta.lower_path)).unwrap_or_default();
+                let file_name = basename(lower_path).unwrap_or(lower_path);
+                if !regex.is_match(lower_path) && !regex.is_match(file_name) {
+                    continue;
+                }
+
+                let path = decode_slice(&guard.arena, meta.path);
+                out.push(SearchResult {
+                    kind: classify_path_kind(&path).to_string(),
+                    path,
+                });
+            }
+        }
+
+        out
+    }
+
+    fn search_wildcard_pattern_case_sensitive(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Vec<SearchResult> {
+        let pattern_bytes = pattern.as_bytes();
+        let guard = self.inner.read();
+        let mut out = Vec::new();
+
+        for meta in guard.files.iter().rev() {
+            if out.len() >= limit {
+                break;
             }
 
             let path = decode_slice(&guard.arena, meta.path);
+            let path_bytes = path.as_bytes();
+            let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
+            if !wildcard_is_match(pattern_bytes, path_bytes)
+                && !wildcard_is_match(pattern_bytes, file_name)
+            {
+                continue;
+            }
+
             out.push(SearchResult {
                 kind: classify_path_kind(&path).to_string(),
                 path,
@@ -308,6 +374,32 @@ impl FileIndex {
             }
 
             let path = decode_slice(&guard.arena, meta.path);
+            out.push(SearchResult {
+                kind: classify_path_kind(&path).to_string(),
+                path,
+            });
+        }
+
+        out
+    }
+
+    fn search_substring_case_sensitive(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+        let needle = query.as_bytes();
+        let guard = self.inner.read();
+        let mut out = Vec::new();
+
+        for meta in guard.files.iter().rev() {
+            if out.len() >= limit {
+                break;
+            }
+
+            let path = decode_slice(&guard.arena, meta.path);
+            let path_bytes = path.as_bytes();
+            let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
+            if !contains_subslice(path_bytes, needle) && !contains_subslice(file_name, needle) {
+                continue;
+            }
+
             out.push(SearchResult {
                 kind: classify_path_kind(&path).to_string(),
                 path,

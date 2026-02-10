@@ -6,6 +6,7 @@ use std::path::Path;
 use once_cell::sync::Lazy;
 
 const REGEX_QUERY_PREFIX: &str = "\u{1f}re\u{1f}";
+const CASE_SENSITIVE_QUERY_PREFIX: &str = "\u{1f}cs\u{1f}";
 
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "msi", "bat", "cmd", "com", "ps1", "vbs", "scr"];
 const ARCHIVE_EXTENSIONS: &[&str] = &[
@@ -81,18 +82,42 @@ pub enum SearchQueryMode {
     Regex,
 }
 
-pub fn encode_search_query_payload(query: &str, mode: SearchQueryMode) -> String {
-    match mode {
-        SearchQueryMode::Wildcard => query.to_string(),
-        SearchQueryMode::Regex => format!("{REGEX_QUERY_PREFIX}{query}"),
+pub fn encode_search_query_payload(
+    query: &str,
+    mode: SearchQueryMode,
+    case_sensitive: bool,
+) -> String {
+    let mut payload = String::new();
+    if case_sensitive {
+        payload.push_str(CASE_SENSITIVE_QUERY_PREFIX);
     }
+    if mode == SearchQueryMode::Regex {
+        payload.push_str(REGEX_QUERY_PREFIX);
+    }
+    payload.push_str(query);
+    payload
 }
 
-pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, &str) {
-    if let Some(query) = payload.strip_prefix(REGEX_QUERY_PREFIX) {
-        return (SearchQueryMode::Regex, query);
+pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, bool, &str) {
+    let mut mode = SearchQueryMode::Wildcard;
+    let mut case_sensitive = false;
+    let mut query = payload;
+
+    loop {
+        if let Some(stripped) = query.strip_prefix(CASE_SENSITIVE_QUERY_PREFIX) {
+            case_sensitive = true;
+            query = stripped;
+            continue;
+        }
+        if let Some(stripped) = query.strip_prefix(REGEX_QUERY_PREFIX) {
+            mode = SearchQueryMode::Regex;
+            query = stripped;
+            continue;
+        }
+        break;
     }
-    (SearchQueryMode::Wildcard, payload)
+
+    (mode, case_sensitive, query)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

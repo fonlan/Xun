@@ -63,6 +63,7 @@ struct QueryDispatch {
     display_query: String,
     encoded_query: String,
     mode: SearchQueryMode,
+    case_sensitive: bool,
 }
 
 #[derive(Default)]
@@ -239,7 +240,7 @@ impl XunApp {
         let drag_state = Arc::new(Mutex::new(None::<(i32, i32, i32, i32)>));
         let result_paths = Arc::new(Mutex::new(Vec::<String>::new()));
         let all_results = Arc::new(Mutex::new(Vec::<SearchResult>::new()));
-        let last_dispatched_query = Arc::new(Mutex::new(None::<(SearchQueryMode, String)>));
+        let last_dispatched_query = Arc::new(Mutex::new(None::<(SearchQueryMode, bool, String)>));
         let opened_item_history = Arc::new(Mutex::new(OpenedItemHistory::load()));
 
         let result_row_fill_timer = Timer::default();
@@ -335,9 +336,10 @@ impl XunApp {
                         Err(err) => {
                             let service_unavailable = is_service_unavailable_error(&err);
                             xlog::warn(format!(
-                                "query worker ipc failed seq={} mode={} query={:?}: {err:#}",
+                                "query worker ipc failed seq={} mode={} case_sensitive={} query={:?}: {err:#}",
                                 dispatch.seq,
                                 search_query_mode_label(dispatch.mode),
+                                search_case_mode_label(dispatch.case_sensitive),
                                 dispatch.display_query
                             ));
                             (Vec::new(), 0, false, service_unavailable)
@@ -345,9 +347,10 @@ impl XunApp {
                     };
 
                     xlog::info(format!(
-                        "query worker done seq={} mode={} query={:?} matches={} elapsed_ms={} index_len={}",
+                        "query worker done seq={} mode={} case_sensitive={} query={:?} matches={} elapsed_ms={} index_len={}",
                         dispatch.seq,
                         search_query_mode_label(dispatch.mode),
+                        search_case_mode_label(dispatch.case_sensitive),
                         dispatch.display_query,
                         results.len(),
                         elapsed_ms,
@@ -362,9 +365,10 @@ impl XunApp {
                     let _ = slint::invoke_from_event_loop(move || {
                         if seq_guard.load(Ordering::Acquire) != dispatch.seq {
                             xlog::info(format!(
-                                "query drop stale seq={} mode={} query={:?}",
+                                "query drop stale seq={} mode={} case_sensitive={} query={:?}",
                                 dispatch.seq,
                                 search_query_mode_label(dispatch.mode),
+                                search_case_mode_label(dispatch.case_sensitive),
                                 dispatch.display_query
                             ));
                             return;
@@ -443,32 +447,40 @@ impl XunApp {
             } else {
                 SearchQueryMode::Wildcard
             };
+            let case_sensitive = window.get_case_sensitive_mode();
 
             {
                 let mut guard = last_dispatched_query_for_ui.lock();
-                if guard.as_ref() == Some(&(mode, query_text.clone())) {
+                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
                     xlog::info(format!(
-                        "query_changed duplicate ignored mode={} query={:?}",
+                        "query_changed duplicate ignored mode={} case_sensitive={} query={:?}",
                         search_query_mode_label(mode),
+                        search_case_mode_label(case_sensitive),
                         query_text
                     ));
                     return;
                 }
-                *guard = Some((mode, query_text.clone()));
+                *guard = Some((mode, case_sensitive, query_text.clone()));
             }
 
             let seq = seq_for_query.fetch_add(1, Ordering::AcqRel) + 1;
             let dispatch = QueryDispatch {
                 seq,
                 display_query: query_text.clone(),
-                encoded_query: encode_search_query_payload(query_text.as_str(), mode),
+                encoded_query: encode_search_query_payload(
+                    query_text.as_str(),
+                    mode,
+                    case_sensitive,
+                ),
                 mode,
+                case_sensitive,
             };
 
             xlog::info(format!(
-                "query dispatch seq={} mode={} query={:?}",
+                "query dispatch seq={} mode={} case_sensitive={} query={:?}",
                 seq,
                 search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
                 query_text
             ));
 
@@ -484,20 +496,22 @@ impl XunApp {
         let seq_for_mode_toggle = query_seq.clone();
         let query_tx_for_mode_toggle = query_tx.clone();
         let last_dispatched_query_for_mode_toggle = last_dispatched_query.clone();
-        ui.on_regex_mode_toggled(move |enabled| {
+        ui.on_regex_mode_toggled(move |_| {
             let Some(window) = weak.upgrade() else {
                 return;
             };
 
-            let mode = if enabled {
+            let mode = if window.get_regex_mode() {
                 SearchQueryMode::Regex
             } else {
                 SearchQueryMode::Wildcard
             };
+            let case_sensitive = window.get_case_sensitive_mode();
             let query_text = window.get_query().to_string();
             xlog::info(format!(
-                "query mode toggled mode={} query={:?}",
+                "query mode toggled mode={} case_sensitive={} query={:?}",
                 search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
                 query_text
             ));
 
@@ -509,24 +523,30 @@ impl XunApp {
 
             {
                 let mut guard = last_dispatched_query_for_mode_toggle.lock();
-                if guard.as_ref() == Some(&(mode, query_text.clone())) {
+                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
                     return;
                 }
-                *guard = Some((mode, query_text.clone()));
+                *guard = Some((mode, case_sensitive, query_text.clone()));
             }
 
             let seq = seq_for_mode_toggle.fetch_add(1, Ordering::AcqRel) + 1;
             let dispatch = QueryDispatch {
                 seq,
                 display_query: query_text.clone(),
-                encoded_query: encode_search_query_payload(query_text.as_str(), mode),
+                encoded_query: encode_search_query_payload(
+                    query_text.as_str(),
+                    mode,
+                    case_sensitive,
+                ),
                 mode,
+                case_sensitive,
             };
 
             xlog::info(format!(
-                "query redispatch by mode toggle seq={} mode={} query={:?}",
+                "query redispatch by mode toggle seq={} mode={} case_sensitive={} query={:?}",
                 seq,
                 search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
                 query_text
             ));
 
@@ -535,6 +555,72 @@ impl XunApp {
                 xlog::error("query redispatch by mode toggle failed: worker channel closed");
                 stop_searching_indicator(&window);
                 *last_dispatched_query_for_mode_toggle.lock() = None;
+            }
+        });
+
+        let weak = ui.as_weak();
+        let seq_for_case_mode_toggle = query_seq.clone();
+        let query_tx_for_case_mode_toggle = query_tx.clone();
+        let last_dispatched_query_for_case_mode_toggle = last_dispatched_query.clone();
+        ui.on_case_sensitive_mode_toggled(move |_| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+
+            let mode = if window.get_regex_mode() {
+                SearchQueryMode::Regex
+            } else {
+                SearchQueryMode::Wildcard
+            };
+            let case_sensitive = window.get_case_sensitive_mode();
+            let query_text = window.get_query().to_string();
+            xlog::info(format!(
+                "query case mode toggled mode={} case_sensitive={} query={:?}",
+                search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
+                query_text
+            ));
+
+            if query_text.trim().is_empty() {
+                stop_searching_indicator(&window);
+                *last_dispatched_query_for_case_mode_toggle.lock() = None;
+                return;
+            }
+
+            {
+                let mut guard = last_dispatched_query_for_case_mode_toggle.lock();
+                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
+                    return;
+                }
+                *guard = Some((mode, case_sensitive, query_text.clone()));
+            }
+
+            let seq = seq_for_case_mode_toggle.fetch_add(1, Ordering::AcqRel) + 1;
+            let dispatch = QueryDispatch {
+                seq,
+                display_query: query_text.clone(),
+                encoded_query: encode_search_query_payload(
+                    query_text.as_str(),
+                    mode,
+                    case_sensitive,
+                ),
+                mode,
+                case_sensitive,
+            };
+
+            xlog::info(format!(
+                "query redispatch by case mode toggle seq={} mode={} case_sensitive={} query={:?}",
+                seq,
+                search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
+                query_text
+            ));
+
+            start_searching_indicator(&window);
+            if query_tx_for_case_mode_toggle.send(dispatch).is_err() {
+                xlog::error("query redispatch by case mode toggle failed: worker channel closed");
+                stop_searching_indicator(&window);
+                *last_dispatched_query_for_case_mode_toggle.lock() = None;
             }
         });
 
@@ -866,6 +952,7 @@ impl XunApp {
                     xlog::info("activate callback invoked");
                     window.set_query("".into());
                     stop_searching_indicator(&window);
+                    window.set_case_sensitive_mode(false);
                     window.set_regex_mode(false);
                     window.set_results(ModelRc::new(VecModel::default()));
                     window.set_selected_index(-1);
@@ -1379,6 +1466,14 @@ fn search_query_mode_label(mode: SearchQueryMode) -> &'static str {
     match mode {
         SearchQueryMode::Wildcard => "wildcard",
         SearchQueryMode::Regex => "regex",
+    }
+}
+
+fn search_case_mode_label(case_sensitive: bool) -> &'static str {
+    if case_sensitive {
+        "case-sensitive"
+    } else {
+        "case-insensitive"
     }
 }
 

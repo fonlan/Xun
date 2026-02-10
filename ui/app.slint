@@ -13,8 +13,9 @@ export component AppWindow inherits Window {
     private property <length> mode-toggle-width: 40px;
     private property <length> mode-toggle-height: 28px;
     private property <length> mode-toggle-right-gap: 10px;
+    private property <length> mode-toggle-gap: 6px;
     private property <length> mode-toggle-input-gap: 8px;
-    private property <length> query-right-reserved: root.mode-toggle-width + root.mode-toggle-right-gap + root.mode-toggle-input-gap;
+    private property <length> query-right-reserved: root.mode-toggle-width * 2 + root.mode-toggle-gap + root.mode-toggle-right-gap + root.mode-toggle-input-gap;
     private property <length> panel-padding: 14px;
     private property <length> filter-bar-height: 34px;
     private property <length> filter-item-spacing: 6px;
@@ -46,6 +47,7 @@ export component AppWindow inherits Window {
     in-out property <int> selected-index: -1;
     in-out property <int> selected-filter-index: 0;
     in-out property <int> total-match-count: 0;
+    in-out property <bool> case-sensitive-mode: false;
     in-out property <bool> regex-mode: false;
     in-out property <bool> initial-index-ready: false;
     in-out property <bool> service-unavailable: false;
@@ -67,6 +69,7 @@ export component AppWindow inherits Window {
 
     callback query-changed(string);
     callback submit(string);
+    callback case-sensitive-mode-toggled(bool);
     callback regex-mode-toggled(bool);
     callback item-activated(string);
     callback item-context-menu-requested(int);
@@ -241,6 +244,43 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                case_mode_toggle := Rectangle {
+                    x: mode_toggle.x - root.mode-toggle-gap - root.mode-toggle-width;
+                    y: (parent.height - root.mode-toggle-height) / 2;
+                    width: root.mode-toggle-width;
+                    height: root.mode-toggle-height;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.case-sensitive-mode
+                        ? #6A8ED2
+                        : (case_mode_toggle_touch.has-hover ? #51607A99 : #3A425266);
+                    background: root.case-sensitive-mode
+                        ? #2E4675
+                        : (case_mode_toggle_touch.has-hover ? #2C344599 : #232A3859);
+
+                    case_mode_toggle_touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.case-sensitive-mode = !root.case-sensitive-mode;
+                            root.case-sensitive-mode-toggled(root.case-sensitive-mode);
+                            root.focus-query-input();
+                        }
+                    }
+
+                    Text {
+                        text: "Aa";
+                        font-family: "Microsoft YaHei UI";
+                        color: root.case-sensitive-mode
+                            ? #EAF0FF
+                            : (case_mode_toggle_touch.has-hover ? #8D9DBA : #74829D);
+                        font-size: 16px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
+                    }
+                }
+
                 Rectangle {
                     width: 86px;
                     height: 24px;
@@ -259,6 +299,34 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: "切换正则模式";
+                        color: #D9E7FF;
+                        font-family: "Microsoft YaHei UI";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
+                        accessible-role: none;
+                    }
+                }
+
+                Rectangle {
+                    width: 110px;
+                    height: 24px;
+                    x: case_mode_toggle.x - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #4E5F7ACC;
+                    background: #1A2435E6;
+                    visible: case_mode_toggle_touch.has-hover;
+                    opacity: case_mode_toggle_touch.has-hover ? 1 : 0;
+                    animate opacity {
+                        duration: 90ms;
+                        easing: ease-out;
+                    }
+
+                    Text {
+                        text: "切换大小写敏感";
                         color: #D9E7FF;
                         font-family: "Microsoft YaHei UI";
                         font-size: 12px;

@@ -18,8 +18,9 @@ use slint::{Image, Model, ModelRc, PhysicalPosition, Timer, TimerMode, VecModel}
 use crate::ipc::{IpcClient, IpcSession, is_service_unavailable_error};
 use crate::model::{FileTypeFilter, SearchQueryMode, SearchResult, encode_search_query_payload};
 use crate::win::{
-    ShellBridge, cursor_position, execute_or_open, is_left_mouse_button_down,
-    launcher_popup_position, load_file_icon_image, monitor_scale_factor_for_cursor,
+    ResultItemContextMenuOutcome, ShellBridge, cursor_position, execute_or_open,
+    execute_result_item_context_menu_action, is_left_mouse_button_down, launcher_popup_position,
+    load_file_icon_image, monitor_scale_factor_for_cursor, show_result_item_context_menu,
 };
 use crate::xlog;
 
@@ -572,6 +573,87 @@ impl XunApp {
             if let Some(window) = weak.upgrade() {
                 let _ = window.hide();
                 xlog::info("window hidden after item activation");
+            }
+        });
+
+        let weak = ui.as_weak();
+        let result_paths_for_context_menu = result_paths.clone();
+        let opened_item_history_for_context_menu = opened_item_history.clone();
+        ui.on_item_context_menu_requested(move |index| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+
+            let normalized_index = index.max(0) as usize;
+            let selected_path = result_paths_for_context_menu
+                .lock()
+                .get(normalized_index)
+                .cloned();
+            let Some(path) = selected_path else {
+                xlog::warn(format!(
+                    "item context menu ignored: index out of range index={index}"
+                ));
+                return;
+            };
+
+            match show_result_item_context_menu() {
+                Ok(Some(action)) => {
+                    xlog::info(format!(
+                        "item context menu action selected index={} path={} action={:?}",
+                        index, path, action
+                    ));
+                    match execute_result_item_context_menu_action(path.as_str(), action) {
+                        Ok(ResultItemContextMenuOutcome::Completed) => {
+                            let should_hide_window = matches!(
+                                action,
+                                crate::win::ResultItemContextMenuAction::Open
+                                    | crate::win::ResultItemContextMenuAction::OpenAsAdmin
+                                    | crate::win::ResultItemContextMenuAction::OpenDirectory
+                            );
+                            let should_record_opened_item = matches!(
+                                action,
+                                crate::win::ResultItemContextMenuAction::Open
+                                    | crate::win::ResultItemContextMenuAction::OpenAsAdmin
+                            );
+
+                            if should_record_opened_item {
+                                record_opened_item(
+                                    &opened_item_history_for_context_menu,
+                                    path.as_str(),
+                                );
+                            }
+
+                            if should_hide_window {
+                                let _ = window.hide();
+                                xlog::info("window hidden after context menu action");
+                            }
+                        }
+                        Ok(ResultItemContextMenuOutcome::CancelledByUser) => {
+                            xlog::info(format!(
+                                "item context menu action cancelled by user index={} path={} action={:?}",
+                                index, path, action
+                            ));
+                        }
+                        Err(err) => {
+                            xlog::warn(format!(
+                                "item context menu action failed index={} path={} action={:?}: {err:#}",
+                                index, path, action
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    xlog::info(format!(
+                        "item context menu dismissed index={} path={}",
+                        index, path
+                    ));
+                }
+                Err(err) => {
+                    xlog::warn(format!(
+                        "show item context menu failed index={} path={}: {err:#}",
+                        index, path
+                    ));
+                }
             }
         });
 

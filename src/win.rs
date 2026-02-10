@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use std::iter;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
+use std::ptr;
 use std::sync::Arc;
 use std::thread;
 
@@ -11,8 +12,8 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError, HANDLE, HWND,
-    LPARAM, LRESULT, POINT, RECT, WPARAM,
+    BOOL, CloseHandle, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GetLastError,
+    GlobalFree, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
@@ -24,7 +25,14 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_OFFLINE, GetLogicalDrives,
     GetVolumeInformationW,
 };
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock,
+};
+use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE,
     REG_SAM_FLAGS, REG_SZ, REG_VALUE_TYPE, RegCloseKey, RegCreateKeyExW, RegDeleteValueW,
@@ -36,19 +44,19 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MOD_ALT, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_LBUTTON, VK_SPACE,
 };
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, SHFILEINFOW, SHGFI_ICON,
-    SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW, Shell_NotifyIconW,
-    ShellExecuteW,
+    DROPFILES, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, SHFILEINFOW,
+    SHGFI_ICON, SHGFI_LARGEICON, SHGFI_SMALLICON, SHGFI_USEFILEATTRIBUTES, SHGetFileInfoW,
+    Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW,
     DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW,
-    DrawIconEx, GetCursorPos, GetMessageW, GetSystemMetrics, HICON, IDC_ARROW, IDI_APPLICATION,
-    LoadCursorW, LoadIconW, MF_CHECKED, MF_STRING, MSG, PostQuitMessage, RegisterClassW,
-    SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow,
-    SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW,
-    WS_OVERLAPPED,
+    DrawIconEx, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, HICON, IDC_ARROW,
+    IDI_APPLICATION, LoadCursorW, LoadIconW, MF_CHECKED, MF_STRING, MSG, PostQuitMessage,
+    RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA, SW_SHOWNORMAL, SendMessageW,
+    SetForegroundWindow, SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+    TranslateMessage, WM_APP, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP,
+    WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::{PCWSTR, w};
 
@@ -61,14 +69,41 @@ const MENU_INSTALL_SERVICE_ID: usize = 1000;
 const MENU_UNINSTALL_SERVICE_ID: usize = 1001;
 const MENU_CLIENT_AUTOSTART_ID: usize = 1002;
 const MENU_EXIT_ID: usize = 1003;
+const MENU_RESULT_OPEN_ID: usize = 1100;
+const MENU_RESULT_OPEN_AS_ADMIN_ID: usize = 1101;
+const MENU_RESULT_OPEN_DIRECTORY_ID: usize = 1102;
+const MENU_RESULT_COPY_ID: usize = 1103;
+const MENU_RESULT_CUT_ID: usize = 1104;
+const MENU_RESULT_COPY_FILE_NAME_ID: usize = 1105;
+const MENU_RESULT_COPY_DIRECTORY_NAME_ID: usize = 1106;
+const MENU_RESULT_COPY_FULL_PATH_ID: usize = 1107;
 const APP_ICON_RESOURCE_ID: usize = 1;
 const RUN_REG_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const CLIENT_AUTOSTART_VALUE_NAME: &str = "XunClient";
+const CLIPBOARD_FORMAT_PREFERRED_DROP_EFFECT: &str = "Preferred DropEffect";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunAsLaunchOutcome {
     Started,
     Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultItemContextMenuAction {
+    Open,
+    OpenAsAdmin,
+    OpenDirectory,
+    Copy,
+    Cut,
+    CopyFileName,
+    CopyDirectoryName,
+    CopyFullPath,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResultItemContextMenuOutcome {
+    Completed,
+    CancelledByUser,
 }
 
 struct OwnedRegKey(HKEY);
@@ -129,6 +164,127 @@ pub fn execute_or_open(input: &str) -> Result<()> {
     let cmd = "cmd.exe";
     let args = format!("/C {trimmed}");
     shell_execute_open(cmd, Some(&args))
+}
+
+pub fn show_result_item_context_menu() -> Result<Option<ResultItemContextMenuAction>> {
+    let menu = unsafe { CreatePopupMenu() }.context("CreatePopupMenu(result item) failed")?;
+
+    let append_menu = |id: usize, text: PCWSTR| {
+        let _ = unsafe { AppendMenuW(menu, MF_STRING, id, text) };
+    };
+    append_menu(MENU_RESULT_OPEN_ID, w!("打开"));
+    append_menu(MENU_RESULT_OPEN_AS_ADMIN_ID, w!("打开（管理员权限）"));
+    append_menu(MENU_RESULT_OPEN_DIRECTORY_ID, w!("打开目录"));
+    append_menu(MENU_RESULT_COPY_ID, w!("复制"));
+    append_menu(MENU_RESULT_CUT_ID, w!("剪切"));
+    append_menu(MENU_RESULT_COPY_FILE_NAME_ID, w!("复制文件名"));
+    append_menu(MENU_RESULT_COPY_DIRECTORY_NAME_ID, w!("复制目录名"));
+    append_menu(MENU_RESULT_COPY_FULL_PATH_ID, w!("复制完整路径"));
+
+    let mut cursor = POINT::default();
+    unsafe {
+        GetCursorPos(&mut cursor).context("GetCursorPos for result item menu failed")?;
+    }
+
+    let owner = unsafe { GetForegroundWindow() };
+    if !owner.is_invalid() {
+        let _ = unsafe { SetForegroundWindow(owner) };
+    }
+
+    let selected = unsafe {
+        TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            cursor.x,
+            cursor.y,
+            0,
+            owner,
+            Some(&RECT::default()),
+        )
+    };
+
+    let _ = unsafe { DestroyMenu(menu) };
+
+    let action = match selected.0 as usize {
+        MENU_RESULT_OPEN_ID => Some(ResultItemContextMenuAction::Open),
+        MENU_RESULT_OPEN_AS_ADMIN_ID => Some(ResultItemContextMenuAction::OpenAsAdmin),
+        MENU_RESULT_OPEN_DIRECTORY_ID => Some(ResultItemContextMenuAction::OpenDirectory),
+        MENU_RESULT_COPY_ID => Some(ResultItemContextMenuAction::Copy),
+        MENU_RESULT_CUT_ID => Some(ResultItemContextMenuAction::Cut),
+        MENU_RESULT_COPY_FILE_NAME_ID => Some(ResultItemContextMenuAction::CopyFileName),
+        MENU_RESULT_COPY_DIRECTORY_NAME_ID => Some(ResultItemContextMenuAction::CopyDirectoryName),
+        MENU_RESULT_COPY_FULL_PATH_ID => Some(ResultItemContextMenuAction::CopyFullPath),
+        _ => None,
+    };
+    Ok(action)
+}
+
+pub fn execute_result_item_context_menu_action(
+    path: &str,
+    action: ResultItemContextMenuAction,
+) -> Result<ResultItemContextMenuOutcome> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Ok(ResultItemContextMenuOutcome::Completed);
+    }
+
+    match action {
+        ResultItemContextMenuAction::Open => {
+            execute_or_open(trimmed)
+                .with_context(|| format!("result item context open failed path={trimmed}"))?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::OpenAsAdmin => {
+            let outcome = shell_execute_runas(trimmed, None).with_context(|| {
+                format!("result item context open as admin failed path={trimmed}")
+            })?;
+            match outcome {
+                RunAsLaunchOutcome::Started => Ok(ResultItemContextMenuOutcome::Completed),
+                RunAsLaunchOutcome::Cancelled => {
+                    xlog::info(format!(
+                        "result item context open as admin cancelled by user path={trimmed}"
+                    ));
+                    Ok(ResultItemContextMenuOutcome::CancelledByUser)
+                }
+            }
+        }
+        ResultItemContextMenuAction::OpenDirectory => {
+            open_directory_for_item(trimmed).with_context(|| {
+                format!("result item context open directory failed path={trimmed}")
+            })?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::Copy => {
+            set_clipboard_file_drop(trimmed, ClipboardDropEffect::Copy)
+                .with_context(|| format!("result item context copy failed path={trimmed}"))?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::Cut => {
+            set_clipboard_file_drop(trimmed, ClipboardDropEffect::Move)
+                .with_context(|| format!("result item context cut failed path={trimmed}"))?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::CopyFileName => {
+            let text = file_name_for_item(trimmed);
+            set_clipboard_text(text.as_str()).with_context(|| {
+                format!("result item context copy file name failed path={trimmed}")
+            })?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::CopyDirectoryName => {
+            let text = directory_name_for_item(trimmed);
+            set_clipboard_text(text.as_str()).with_context(|| {
+                format!("result item context copy directory name failed path={trimmed}")
+            })?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+        ResultItemContextMenuAction::CopyFullPath => {
+            set_clipboard_text(trimmed).with_context(|| {
+                format!("result item context copy full path failed path={trimmed}")
+            })?;
+            Ok(ResultItemContextMenuOutcome::Completed)
+        }
+    }
 }
 
 pub fn load_file_icon_image(path: &str, size_px: u32) -> Option<Image> {
@@ -274,33 +430,19 @@ fn shell_execute_open(target: &str, args: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn launch_install_service() -> Result<RunAsLaunchOutcome> {
-    launch_elevated_with_arg("--install-service")
-}
-
-fn launch_uninstall_service() -> Result<RunAsLaunchOutcome> {
-    launch_elevated_with_arg("--uninstall-service")
-}
-
-pub fn launch_start_service_elevated() -> Result<RunAsLaunchOutcome> {
-    launch_elevated_with_arg("--start-service")
-}
-
-pub fn launch_stop_service_elevated() -> Result<RunAsLaunchOutcome> {
-    launch_elevated_with_arg("--stop-service")
-}
-
-fn launch_elevated_with_arg(arg: &str) -> Result<RunAsLaunchOutcome> {
-    let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let exe_w = to_wide(exe.to_string_lossy().as_ref());
-    let args_w = to_wide(arg);
+fn shell_execute_runas(target: &str, args: Option<&str>) -> Result<RunAsLaunchOutcome> {
+    let target_w = to_wide(target);
+    let args_w = args.map(to_wide);
 
     unsafe {
         let ret = ShellExecuteW(
             None,
             w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            PCWSTR(args_w.as_ptr()),
+            PCWSTR(target_w.as_ptr()),
+            args_w
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
             PCWSTR::null(),
             SW_SHOWNORMAL,
         );
@@ -320,6 +462,202 @@ fn launch_elevated_with_arg(arg: &str) -> Result<RunAsLaunchOutcome> {
             last_error.0
         ))
     }
+}
+
+fn launch_install_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--install-service")
+}
+
+fn launch_uninstall_service() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--uninstall-service")
+}
+
+pub fn launch_start_service_elevated() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--start-service")
+}
+
+pub fn launch_stop_service_elevated() -> Result<RunAsLaunchOutcome> {
+    launch_elevated_with_arg("--stop-service")
+}
+
+fn launch_elevated_with_arg(arg: &str) -> Result<RunAsLaunchOutcome> {
+    let exe = std::env::current_exe().context("failed to resolve current executable")?;
+    shell_execute_runas(exe.to_string_lossy().as_ref(), Some(arg))
+}
+
+fn open_directory_for_item(path: &str) -> Result<()> {
+    let target = Path::new(path);
+    if target.is_dir() {
+        return shell_execute_open(path, None);
+    }
+
+    if target.exists() {
+        let args = format!("/select,\"{}\"", path);
+        return shell_execute_open("explorer.exe", Some(args.as_str()));
+    }
+
+    let Some(parent) = target.parent() else {
+        return Err(anyhow!(
+            "failed to resolve parent directory for path={path}"
+        ));
+    };
+    shell_execute_open(parent.to_string_lossy().as_ref(), None)
+}
+
+fn file_name_for_item(path: &str) -> String {
+    let target = Path::new(path);
+    target
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn directory_name_for_item(path: &str) -> String {
+    let target = Path::new(path);
+    let directory = if target.is_dir() {
+        target
+    } else {
+        target.parent().unwrap_or(target)
+    };
+
+    directory
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| directory.to_string_lossy().into_owned())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClipboardDropEffect {
+    Copy,
+    Move,
+}
+
+impl ClipboardDropEffect {
+    fn as_u32(self) -> u32 {
+        match self {
+            Self::Copy => 1,
+            Self::Move => 2,
+        }
+    }
+}
+
+struct ClipboardGuard;
+
+impl ClipboardGuard {
+    fn open() -> Result<Self> {
+        unsafe {
+            OpenClipboard(HWND::default()).context("OpenClipboard failed")?;
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseClipboard();
+        }
+    }
+}
+
+fn set_clipboard_text(text: &str) -> Result<()> {
+    let _guard = ClipboardGuard::open()?;
+    unsafe {
+        EmptyClipboard().context("EmptyClipboard for text failed")?;
+    }
+
+    let text_wide = to_wide(text);
+    let payload = utf16_payload_bytes(text_wide.as_slice());
+    set_clipboard_data_from_bytes(CF_UNICODETEXT.0 as u32, payload.as_slice())
+}
+
+fn set_clipboard_file_drop(path: &str, effect: ClipboardDropEffect) -> Result<()> {
+    let _guard = ClipboardGuard::open()?;
+    unsafe {
+        EmptyClipboard().context("EmptyClipboard for file drop failed")?;
+    }
+
+    let drop_payload = build_dropfiles_payload(path)?;
+    set_clipboard_data_from_bytes(CF_HDROP.0 as u32, drop_payload.as_slice())?;
+
+    let format_wide = to_wide(CLIPBOARD_FORMAT_PREFERRED_DROP_EFFECT);
+    let preferred_drop_effect_format =
+        unsafe { RegisterClipboardFormatW(PCWSTR(format_wide.as_ptr())) };
+    if preferred_drop_effect_format == 0 {
+        return Err(anyhow!(
+            "RegisterClipboardFormatW({CLIPBOARD_FORMAT_PREFERRED_DROP_EFFECT}) failed"
+        ));
+    }
+
+    let effect_payload = effect.as_u32().to_le_bytes();
+    set_clipboard_data_from_bytes(preferred_drop_effect_format, effect_payload.as_slice())
+}
+
+fn build_dropfiles_payload(path: &str) -> Result<Vec<u8>> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("dropfiles path is empty"));
+    }
+
+    let mut files_wide = to_wide(trimmed);
+    files_wide.push(0);
+
+    let files_payload = utf16_payload_bytes(files_wide.as_slice());
+    let dropfiles_size = std::mem::size_of::<DROPFILES>();
+    let total_size = dropfiles_size + files_payload.len();
+    let mut payload = vec![0u8; total_size];
+
+    let header = DROPFILES {
+        pFiles: dropfiles_size as u32,
+        pt: POINT::default(),
+        fNC: BOOL(0),
+        fWide: BOOL(1),
+    };
+
+    unsafe {
+        ptr::copy_nonoverlapping(
+            (&header as *const DROPFILES).cast::<u8>(),
+            payload.as_mut_ptr(),
+            dropfiles_size,
+        );
+    }
+    payload[dropfiles_size..].copy_from_slice(files_payload.as_slice());
+    Ok(payload)
+}
+
+fn utf16_payload_bytes(values: &[u16]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(values.len() * 2);
+    for value in values {
+        payload.extend_from_slice(&value.to_le_bytes());
+    }
+    payload
+}
+
+fn set_clipboard_data_from_bytes(format: u32, payload: &[u8]) -> Result<()> {
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, payload.len()) }
+        .with_context(|| format!("GlobalAlloc failed for clipboard format={format}"))?;
+
+    let memory_ptr = unsafe { GlobalLock(memory) };
+    if memory_ptr.is_null() {
+        let _ = unsafe { GlobalFree(memory) };
+        return Err(anyhow!("GlobalLock failed for clipboard format={format}"));
+    }
+
+    unsafe {
+        ptr::copy_nonoverlapping(payload.as_ptr(), memory_ptr.cast::<u8>(), payload.len());
+        let _ = GlobalUnlock(memory);
+    }
+
+    let handle = HANDLE(memory.0);
+    if let Err(err) = unsafe { SetClipboardData(format, handle) } {
+        let _ = unsafe { GlobalFree(memory) };
+        return Err(err)
+            .with_context(|| format!("SetClipboardData failed for clipboard format={format}"));
+    }
+
+    Ok(())
 }
 
 fn client_autostart_command() -> Result<String> {

@@ -66,6 +66,7 @@ export component AppWindow inherits Window {
     callback submit(string);
     callback regex-mode-toggled(bool);
     callback item-activated(string);
+    callback item-context-menu-requested(int);
     callback filter-selected(int);
     callback esc-pressed();
     callback drag-window-start();
@@ -300,6 +301,12 @@ export component AppWindow inherits Window {
                             TouchArea {
                                 width: row.width;
                                 height: row.height;
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                        root.selected-index = index;
+                                        root.item-context-menu-requested(index);
+                                    }
+                                }
                                 clicked => {
                                     root.selected-index = index;
                                     root.item-activated(item.path);

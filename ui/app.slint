@@ -295,10 +295,16 @@ export component AppWindow inherits Window {
                             width: max(0px, results-list.visible-width - root.result-safe-inset-right);
                             height: root.result-row-height;
                             clip: true;
-                            background: index == root.selected-index ? #36507A : #202634;
+                            background: index == root.selected-index
+                                ? #36507A
+                                : (result_row_touch.has-hover ? #2A3243 : #202634);
                             border-radius: 8px;
+                            animate background {
+                                duration: 120ms;
+                                easing: ease-in-out;
+                            }
 
-                            TouchArea {
+                            result_row_touch := TouchArea {
                                 width: row.width;
                                 height: row.height;
                                 pointer-event(event) => {
@@ -329,7 +335,9 @@ export component AppWindow inherits Window {
                                 height: row.height;
                                 text: item.path;
                                 font-family: "Microsoft YaHei UI";
-                                color: #EAF0FF;
+                                color: index == root.selected-index
+                                    ? #F3F8FF
+                                    : (result_row_touch.has-hover ? #F0F5FF : #EAF0FF);
                                 vertical-alignment: center;
                                 overflow: elide;
                             }
@@ -341,7 +349,9 @@ export component AppWindow inherits Window {
                                 height: row.height;
                                 text: item.meta;
                                 font-family: "Microsoft YaHei UI";
-                                color: #9DB1D6;
+                                color: index == root.selected-index
+                                    ? #D6E4FF
+                                    : (result_row_touch.has-hover ? #B1C3E2 : #9DB1D6);
                                 horizontal-alignment: right;
                                 vertical-alignment: center;
                                 overflow: elide;

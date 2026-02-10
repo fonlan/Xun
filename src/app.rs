@@ -30,7 +30,8 @@ const QUERY_DEBOUNCE_ONE_CHAR_MS: u64 = 180;
 const QUERY_DEBOUNCE_TWO_CHARS_MS: u64 = 130;
 const QUERY_DEBOUNCE_THREE_TO_FOUR_CHARS_MS: u64 = 90;
 const QUERY_DEBOUNCE_LONG_QUERY_MS: u64 = 60;
-const RESULT_ICON_SIZE_PX: u32 = 24;
+const RESULT_ICON_LOGICAL_SIZE_PX: u32 = 24;
+const RESULT_ICON_MIN_SOURCE_SIZE_PX: u32 = 32;
 const MAX_RESULT_ICON_CACHE: usize = 4096;
 const MAX_RESULT_META_CACHE: usize = 4096;
 const OPENED_ITEM_HISTORY_FILE_NAME: &str = "opened-items.v1";
@@ -824,12 +825,13 @@ fn apply_results_for_filter(
 
     filtered.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
 
+    let icon_source_size_px = result_icon_source_size_for_window(window);
     let mut rows = Vec::with_capacity(filtered.len());
     let mut paths = Vec::with_capacity(filtered.len());
     for (_, _, item) in filtered {
         let path = item.path.clone();
         rows.push(ResultRow {
-            icon: icon_for_path(path.as_str()),
+            icon: icon_for_path(path.as_str(), icon_source_size_px),
             path: path.as_str().into(),
             meta: meta_for_path(path.as_str()).into(),
         });
@@ -872,20 +874,42 @@ fn now_unix_millis() -> u128 {
         .unwrap_or(0)
 }
 
-fn icon_for_path(path: &str) -> Image {
+fn icon_for_path(path: &str, icon_source_size_px: u32) -> Image {
     RESULT_ICON_CACHE.with(|cache_cell| {
         let mut cache = cache_cell.borrow_mut();
-        if let Some(image) = cache.get(path) {
+        let cache_key = result_icon_cache_key(path, icon_source_size_px);
+        if let Some(image) = cache.get(cache_key.as_str()) {
             return image.clone();
         }
 
-        let image = load_file_icon_image(path, RESULT_ICON_SIZE_PX).unwrap_or_default();
+        let image = load_file_icon_image(path, icon_source_size_px).unwrap_or_default();
         if cache.len() >= MAX_RESULT_ICON_CACHE {
             cache.clear();
         }
-        cache.insert(path.to_string(), image.clone());
+        cache.insert(cache_key, image.clone());
         image
     })
+}
+
+fn result_icon_source_size_for_window(window: &AppWindow) -> u32 {
+    let window_scale = window.window().scale_factor().max(0.1);
+    let monitor_scale = monitor_scale_factor_for_cursor()
+        .unwrap_or(window_scale)
+        .max(0.1);
+    let target_physical_size = ((RESULT_ICON_LOGICAL_SIZE_PX as f32) * monitor_scale).ceil() as u32;
+    let preferred_size = target_physical_size.max(RESULT_ICON_MIN_SOURCE_SIZE_PX);
+
+    match preferred_size {
+        0..=16 => 16,
+        17..=24 => 24,
+        25..=32 => 32,
+        33..=48 => 48,
+        _ => 64,
+    }
+}
+
+fn result_icon_cache_key(path: &str, icon_source_size_px: u32) -> String {
+    format!("{icon_source_size_px}|{path}")
 }
 
 fn clear_result_icon_cache() {

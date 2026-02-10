@@ -213,11 +213,13 @@ fn hicon_to_slint_image(icon: HICON, size_px: i32) -> Option<Image> {
             return None;
         }
 
+        let pixel_count = (size_px * size_px) as usize;
+        std::ptr::write_bytes(bits.cast::<u8>(), 0, pixel_count * 4);
+
         let old_bitmap = SelectObject(dc, bitmap);
         let draw_ok = DrawIconEx(dc, 0, 0, icon, size_px, size_px, 0, None, DI_NORMAL).is_ok();
 
         let image = if draw_ok {
-            let pixel_count = (size_px * size_px) as usize;
             let bgra = std::slice::from_raw_parts(bits.cast::<u8>(), pixel_count * 4);
             let mut rgba = vec![0u8; pixel_count * 4];
             for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {

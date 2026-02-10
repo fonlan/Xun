@@ -204,7 +204,7 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                Rectangle {
+                mode_toggle := Rectangle {
                     x: parent.width - root.mode-toggle-width - root.mode-toggle-right-gap;
                     y: (parent.height - root.mode-toggle-height) / 2;
                     width: root.mode-toggle-width;
@@ -238,6 +238,34 @@ export component AppWindow inherits Window {
                         horizontal-alignment: center;
                         vertical-alignment: center;
                         overflow: clip;
+                    }
+                }
+
+                Rectangle {
+                    width: 86px;
+                    height: 24px;
+                    x: mode_toggle.x - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #4E5F7ACC;
+                    background: #1A2435E6;
+                    visible: mode_toggle_touch.has-hover;
+                    opacity: mode_toggle_touch.has-hover ? 1 : 0;
+                    animate opacity {
+                        duration: 90ms;
+                        easing: ease-out;
+                    }
+
+                    Text {
+                        text: "切换正则模式";
+                        color: #D9E7FF;
+                        font-family: "Microsoft YaHei UI";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
+                        accessible-role: none;
                     }
                 }
             }

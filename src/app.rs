@@ -64,6 +64,7 @@ struct QueryDispatch {
     encoded_query: String,
     mode: SearchQueryMode,
     case_sensitive: bool,
+    full_path: bool,
 }
 
 #[derive(Default)]
@@ -240,7 +241,8 @@ impl XunApp {
         let drag_state = Arc::new(Mutex::new(None::<(i32, i32, i32, i32)>));
         let result_paths = Arc::new(Mutex::new(Vec::<String>::new()));
         let all_results = Arc::new(Mutex::new(Vec::<SearchResult>::new()));
-        let last_dispatched_query = Arc::new(Mutex::new(None::<(SearchQueryMode, bool, String)>));
+        let last_dispatched_query =
+            Arc::new(Mutex::new(None::<(SearchQueryMode, bool, bool, String)>));
         let opened_item_history = Arc::new(Mutex::new(OpenedItemHistory::load()));
 
         let result_row_fill_timer = Timer::default();
@@ -336,10 +338,11 @@ impl XunApp {
                         Err(err) => {
                             let service_unavailable = is_service_unavailable_error(&err);
                             xlog::warn(format!(
-                                "query worker ipc failed seq={} mode={} case_sensitive={} query={:?}: {err:#}",
+                                "query worker ipc failed seq={} mode={} case_sensitive={} full_path={} query={:?}: {err:#}",
                                 dispatch.seq,
                                 search_query_mode_label(dispatch.mode),
                                 search_case_mode_label(dispatch.case_sensitive),
+                                search_full_path_mode_label(dispatch.full_path),
                                 dispatch.display_query
                             ));
                             (Vec::new(), 0, false, service_unavailable)
@@ -347,10 +350,11 @@ impl XunApp {
                     };
 
                     xlog::info(format!(
-                        "query worker done seq={} mode={} case_sensitive={} query={:?} matches={} elapsed_ms={} index_len={}",
+                        "query worker done seq={} mode={} case_sensitive={} full_path={} query={:?} matches={} elapsed_ms={} index_len={}",
                         dispatch.seq,
                         search_query_mode_label(dispatch.mode),
                         search_case_mode_label(dispatch.case_sensitive),
+                        search_full_path_mode_label(dispatch.full_path),
                         dispatch.display_query,
                         results.len(),
                         elapsed_ms,
@@ -365,10 +369,11 @@ impl XunApp {
                     let _ = slint::invoke_from_event_loop(move || {
                         if seq_guard.load(Ordering::Acquire) != dispatch.seq {
                             xlog::info(format!(
-                                "query drop stale seq={} mode={} case_sensitive={} query={:?}",
+                                "query drop stale seq={} mode={} case_sensitive={} full_path={} query={:?}",
                                 dispatch.seq,
                                 search_query_mode_label(dispatch.mode),
                                 search_case_mode_label(dispatch.case_sensitive),
+                                search_full_path_mode_label(dispatch.full_path),
                                 dispatch.display_query
                             ));
                             return;
@@ -448,19 +453,21 @@ impl XunApp {
                 SearchQueryMode::Wildcard
             };
             let case_sensitive = window.get_case_sensitive_mode();
+            let full_path = window.get_full_path_mode();
 
             {
                 let mut guard = last_dispatched_query_for_ui.lock();
-                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
+                if guard.as_ref() == Some(&(mode, case_sensitive, full_path, query_text.clone())) {
                     xlog::info(format!(
-                        "query_changed duplicate ignored mode={} case_sensitive={} query={:?}",
+                        "query_changed duplicate ignored mode={} case_sensitive={} full_path={} query={:?}",
                         search_query_mode_label(mode),
                         search_case_mode_label(case_sensitive),
+                        search_full_path_mode_label(full_path),
                         query_text
                     ));
                     return;
                 }
-                *guard = Some((mode, case_sensitive, query_text.clone()));
+                *guard = Some((mode, case_sensitive, full_path, query_text.clone()));
             }
 
             let seq = seq_for_query.fetch_add(1, Ordering::AcqRel) + 1;
@@ -471,16 +478,19 @@ impl XunApp {
                     query_text.as_str(),
                     mode,
                     case_sensitive,
+                    full_path,
                 ),
                 mode,
                 case_sensitive,
+                full_path,
             };
 
             xlog::info(format!(
-                "query dispatch seq={} mode={} case_sensitive={} query={:?}",
+                "query dispatch seq={} mode={} case_sensitive={} full_path={} query={:?}",
                 seq,
                 search_query_mode_label(mode),
                 search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
                 query_text
             ));
 
@@ -507,11 +517,13 @@ impl XunApp {
                 SearchQueryMode::Wildcard
             };
             let case_sensitive = window.get_case_sensitive_mode();
+            let full_path = window.get_full_path_mode();
             let query_text = window.get_query().to_string();
             xlog::info(format!(
-                "query mode toggled mode={} case_sensitive={} query={:?}",
+                "query mode toggled mode={} case_sensitive={} full_path={} query={:?}",
                 search_query_mode_label(mode),
                 search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
                 query_text
             ));
 
@@ -523,10 +535,10 @@ impl XunApp {
 
             {
                 let mut guard = last_dispatched_query_for_mode_toggle.lock();
-                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
+                if guard.as_ref() == Some(&(mode, case_sensitive, full_path, query_text.clone())) {
                     return;
                 }
-                *guard = Some((mode, case_sensitive, query_text.clone()));
+                *guard = Some((mode, case_sensitive, full_path, query_text.clone()));
             }
 
             let seq = seq_for_mode_toggle.fetch_add(1, Ordering::AcqRel) + 1;
@@ -537,16 +549,19 @@ impl XunApp {
                     query_text.as_str(),
                     mode,
                     case_sensitive,
+                    full_path,
                 ),
                 mode,
                 case_sensitive,
+                full_path,
             };
 
             xlog::info(format!(
-                "query redispatch by mode toggle seq={} mode={} case_sensitive={} query={:?}",
+                "query redispatch by mode toggle seq={} mode={} case_sensitive={} full_path={} query={:?}",
                 seq,
                 search_query_mode_label(mode),
                 search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
                 query_text
             ));
 
@@ -573,11 +588,13 @@ impl XunApp {
                 SearchQueryMode::Wildcard
             };
             let case_sensitive = window.get_case_sensitive_mode();
+            let full_path = window.get_full_path_mode();
             let query_text = window.get_query().to_string();
             xlog::info(format!(
-                "query case mode toggled mode={} case_sensitive={} query={:?}",
+                "query case mode toggled mode={} case_sensitive={} full_path={} query={:?}",
                 search_query_mode_label(mode),
                 search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
                 query_text
             ));
 
@@ -589,10 +606,10 @@ impl XunApp {
 
             {
                 let mut guard = last_dispatched_query_for_case_mode_toggle.lock();
-                if guard.as_ref() == Some(&(mode, case_sensitive, query_text.clone())) {
+                if guard.as_ref() == Some(&(mode, case_sensitive, full_path, query_text.clone())) {
                     return;
                 }
-                *guard = Some((mode, case_sensitive, query_text.clone()));
+                *guard = Some((mode, case_sensitive, full_path, query_text.clone()));
             }
 
             let seq = seq_for_case_mode_toggle.fetch_add(1, Ordering::AcqRel) + 1;
@@ -603,16 +620,19 @@ impl XunApp {
                     query_text.as_str(),
                     mode,
                     case_sensitive,
+                    full_path,
                 ),
                 mode,
                 case_sensitive,
+                full_path,
             };
 
             xlog::info(format!(
-                "query redispatch by case mode toggle seq={} mode={} case_sensitive={} query={:?}",
+                "query redispatch by case mode toggle seq={} mode={} case_sensitive={} full_path={} query={:?}",
                 seq,
                 search_query_mode_label(mode),
                 search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
                 query_text
             ));
 
@@ -621,6 +641,77 @@ impl XunApp {
                 xlog::error("query redispatch by case mode toggle failed: worker channel closed");
                 stop_searching_indicator(&window);
                 *last_dispatched_query_for_case_mode_toggle.lock() = None;
+            }
+        });
+
+        let weak = ui.as_weak();
+        let seq_for_full_path_toggle = query_seq.clone();
+        let query_tx_for_full_path_toggle = query_tx.clone();
+        let last_dispatched_query_for_full_path_toggle = last_dispatched_query.clone();
+        ui.on_full_path_mode_toggled(move |_| {
+            let Some(window) = weak.upgrade() else {
+                return;
+            };
+
+            let mode = if window.get_regex_mode() {
+                SearchQueryMode::Regex
+            } else {
+                SearchQueryMode::Wildcard
+            };
+            let case_sensitive = window.get_case_sensitive_mode();
+            let full_path = window.get_full_path_mode();
+            let query_text = window.get_query().to_string();
+            xlog::info(format!(
+                "query full path mode toggled mode={} case_sensitive={} full_path={} query={:?}",
+                search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
+                query_text
+            ));
+
+            if query_text.trim().is_empty() {
+                stop_searching_indicator(&window);
+                *last_dispatched_query_for_full_path_toggle.lock() = None;
+                return;
+            }
+
+            {
+                let mut guard = last_dispatched_query_for_full_path_toggle.lock();
+                if guard.as_ref() == Some(&(mode, case_sensitive, full_path, query_text.clone())) {
+                    return;
+                }
+                *guard = Some((mode, case_sensitive, full_path, query_text.clone()));
+            }
+
+            let seq = seq_for_full_path_toggle.fetch_add(1, Ordering::AcqRel) + 1;
+            let dispatch = QueryDispatch {
+                seq,
+                display_query: query_text.clone(),
+                encoded_query: encode_search_query_payload(
+                    query_text.as_str(),
+                    mode,
+                    case_sensitive,
+                    full_path,
+                ),
+                mode,
+                case_sensitive,
+                full_path,
+            };
+
+            xlog::info(format!(
+                "query redispatch by full path toggle seq={} mode={} case_sensitive={} full_path={} query={:?}",
+                seq,
+                search_query_mode_label(mode),
+                search_case_mode_label(case_sensitive),
+                search_full_path_mode_label(full_path),
+                query_text
+            ));
+
+            start_searching_indicator(&window);
+            if query_tx_for_full_path_toggle.send(dispatch).is_err() {
+                xlog::error("query redispatch by full path toggle failed: worker channel closed");
+                stop_searching_indicator(&window);
+                *last_dispatched_query_for_full_path_toggle.lock() = None;
             }
         });
 
@@ -954,6 +1045,7 @@ impl XunApp {
                     stop_searching_indicator(&window);
                     window.set_case_sensitive_mode(false);
                     window.set_regex_mode(false);
+                    window.set_full_path_mode(false);
                     window.set_results(ModelRc::new(VecModel::default()));
                     window.set_selected_index(-1);
                     window.set_selected_filter_index(0);
@@ -1475,6 +1567,10 @@ fn search_case_mode_label(case_sensitive: bool) -> &'static str {
     } else {
         "case-insensitive"
     }
+}
+
+fn search_full_path_mode_label(full_path: bool) -> &'static str {
+    if full_path { "full-path" } else { "file-name" }
 }
 
 fn query_debounce_duration(query: &str) -> Duration {

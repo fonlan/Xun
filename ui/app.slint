@@ -15,7 +15,7 @@ export component AppWindow inherits Window {
     private property <length> mode-toggle-right-gap: 10px;
     private property <length> mode-toggle-gap: 6px;
     private property <length> mode-toggle-input-gap: 8px;
-    private property <length> query-right-reserved: root.mode-toggle-width * 2 + root.mode-toggle-gap + root.mode-toggle-right-gap + root.mode-toggle-input-gap;
+    private property <length> query-right-reserved: root.mode-toggle-width * 3 + root.mode-toggle-gap * 2 + root.mode-toggle-right-gap + root.mode-toggle-input-gap;
     private property <length> panel-padding: 14px;
     private property <length> filter-bar-height: 34px;
     private property <length> filter-item-spacing: 6px;
@@ -49,6 +49,7 @@ export component AppWindow inherits Window {
     in-out property <int> total-match-count: 0;
     in-out property <bool> case-sensitive-mode: false;
     in-out property <bool> regex-mode: false;
+    in-out property <bool> full-path-mode: false;
     in-out property <bool> initial-index-ready: false;
     in-out property <bool> service-unavailable: false;
     in-out property <bool> service-starting: false;
@@ -71,6 +72,7 @@ export component AppWindow inherits Window {
     callback submit(string);
     callback case-sensitive-mode-toggled(bool);
     callback regex-mode-toggled(bool);
+    callback full-path-mode-toggled(bool);
     callback item-activated(string);
     callback item-context-menu-requested(int);
     callback filter-selected(int);
@@ -281,6 +283,43 @@ export component AppWindow inherits Window {
                     }
                 }
 
+                full_mode_toggle := Rectangle {
+                    x: case_mode_toggle.x - root.mode-toggle-gap - root.mode-toggle-width;
+                    y: (parent.height - root.mode-toggle-height) / 2;
+                    width: root.mode-toggle-width;
+                    height: root.mode-toggle-height;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: root.full-path-mode
+                        ? #699A76
+                        : (full_mode_toggle_touch.has-hover ? #51607A99 : #3A425266);
+                    background: root.full-path-mode
+                        ? #2E5B3D
+                        : (full_mode_toggle_touch.has-hover ? #2C344599 : #232A3859);
+
+                    full_mode_toggle_touch := TouchArea {
+                        width: parent.width;
+                        height: parent.height;
+                        clicked => {
+                            root.full-path-mode = !root.full-path-mode;
+                            root.full-path-mode-toggled(root.full-path-mode);
+                            root.focus-query-input();
+                        }
+                    }
+
+                    Text {
+                        text: "Full";
+                        font-family: "Microsoft YaHei UI";
+                        color: root.full-path-mode
+                            ? #EAF0FF
+                            : (full_mode_toggle_touch.has-hover ? #8D9DBA : #74829D);
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
+                    }
+                }
+
                 Rectangle {
                     width: 86px;
                     height: 24px;
@@ -327,6 +366,34 @@ export component AppWindow inherits Window {
 
                     Text {
                         text: "切换大小写敏感";
+                        color: #D9E7FF;
+                        font-family: "Microsoft YaHei UI";
+                        font-size: 12px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        overflow: clip;
+                        accessible-role: none;
+                    }
+                }
+
+                Rectangle {
+                    width: 98px;
+                    height: 24px;
+                    x: full_mode_toggle.x - self.width - 8px;
+                    y: (parent.height - self.height) / 2;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: #4E5F7ACC;
+                    background: #1A2435E6;
+                    visible: full_mode_toggle_touch.has-hover;
+                    opacity: full_mode_toggle_touch.has-hover ? 1 : 0;
+                    animate opacity {
+                        duration: 90ms;
+                        easing: ease-out;
+                    }
+
+                    Text {
+                        text: "切换全路径匹配";
                         color: #D9E7FF;
                         font-family: "Microsoft YaHei UI";
                         font-size: 12px;

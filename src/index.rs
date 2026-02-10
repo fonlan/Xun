@@ -228,10 +228,12 @@ impl FileIndex {
     }
 
     pub fn search(&self, query_payload: &str, limit: usize) -> Vec<SearchResult> {
-        let (mode, case_sensitive, query) = decode_search_query_payload(query_payload);
+        let (mode, case_sensitive, full_path, query) = decode_search_query_payload(query_payload);
         match mode {
-            SearchQueryMode::Wildcard => self.search_wildcard(query, limit, case_sensitive),
-            SearchQueryMode::Regex => self.search_regex(query, limit, case_sensitive),
+            SearchQueryMode::Wildcard => {
+                self.search_wildcard(query, limit, case_sensitive, full_path)
+            }
+            SearchQueryMode::Regex => self.search_regex(query, limit, case_sensitive, full_path),
         }
     }
 
@@ -240,6 +242,7 @@ impl FileIndex {
         query: &str,
         limit: usize,
         case_sensitive: bool,
+        full_path: bool,
     ) -> Vec<SearchResult> {
         if case_sensitive {
             let pattern = query.trim();
@@ -248,10 +251,10 @@ impl FileIndex {
             }
 
             if has_wildcard_operator(pattern) {
-                return self.search_wildcard_pattern_case_sensitive(pattern, limit);
+                return self.search_wildcard_pattern_case_sensitive(pattern, limit, full_path);
             }
 
-            return self.search_substring_case_sensitive(pattern, limit);
+            return self.search_substring_case_sensitive(pattern, limit, full_path);
         }
 
         let normalized = query.trim().to_ascii_lowercase();
@@ -260,13 +263,19 @@ impl FileIndex {
         }
 
         if has_wildcard_operator(normalized.as_str()) {
-            return self.search_wildcard_pattern(normalized.as_str(), limit);
+            return self.search_wildcard_pattern(normalized.as_str(), limit, full_path);
         }
 
-        self.search_substring(normalized.as_str(), limit)
+        self.search_substring(normalized.as_str(), limit, full_path)
     }
 
-    fn search_regex(&self, query: &str, limit: usize, case_sensitive: bool) -> Vec<SearchResult> {
+    fn search_regex(
+        &self,
+        query: &str,
+        limit: usize,
+        case_sensitive: bool,
+        full_path: bool,
+    ) -> Vec<SearchResult> {
         let pattern = query.trim();
         if pattern.is_empty() {
             return Vec::new();
@@ -296,7 +305,7 @@ impl FileIndex {
             if case_sensitive {
                 let path = decode_slice(&guard.arena, meta.path);
                 let file_name = basename(path.as_str()).unwrap_or(path.as_str());
-                if !regex.is_match(path.as_str()) && !regex.is_match(file_name) {
+                if !regex.is_match(file_name) && (full_path && !regex.is_match(path.as_str())) {
                     continue;
                 }
 
@@ -308,7 +317,7 @@ impl FileIndex {
                 let lower_path =
                     std::str::from_utf8(guard.arena.get(meta.lower_path)).unwrap_or_default();
                 let file_name = basename(lower_path).unwrap_or(lower_path);
-                if !regex.is_match(lower_path) && !regex.is_match(file_name) {
+                if !regex.is_match(file_name) && (full_path && !regex.is_match(lower_path)) {
                     continue;
                 }
 
@@ -327,6 +336,7 @@ impl FileIndex {
         &self,
         pattern: &str,
         limit: usize,
+        full_path: bool,
     ) -> Vec<SearchResult> {
         let pattern_bytes = pattern.as_bytes();
         let guard = self.inner.read();
@@ -340,8 +350,8 @@ impl FileIndex {
             let path = decode_slice(&guard.arena, meta.path);
             let path_bytes = path.as_bytes();
             let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
-            if !wildcard_is_match(pattern_bytes, path_bytes)
-                && !wildcard_is_match(pattern_bytes, file_name)
+            if !wildcard_is_match(pattern_bytes, file_name)
+                && (full_path && !wildcard_is_match(pattern_bytes, path_bytes))
             {
                 continue;
             }
@@ -355,7 +365,12 @@ impl FileIndex {
         out
     }
 
-    fn search_wildcard_pattern(&self, pattern: &str, limit: usize) -> Vec<SearchResult> {
+    fn search_wildcard_pattern(
+        &self,
+        pattern: &str,
+        limit: usize,
+        full_path: bool,
+    ) -> Vec<SearchResult> {
         let pattern_bytes = pattern.as_bytes();
         let guard = self.inner.read();
         let mut out = Vec::new();
@@ -367,8 +382,8 @@ impl FileIndex {
 
             let lower_path = guard.arena.get(meta.lower_path);
             let file_name = basename_bytes(lower_path).unwrap_or(lower_path);
-            if !wildcard_is_match(pattern_bytes, lower_path)
-                && !wildcard_is_match(pattern_bytes, file_name)
+            if !wildcard_is_match(pattern_bytes, file_name)
+                && (full_path && !wildcard_is_match(pattern_bytes, lower_path))
             {
                 continue;
             }
@@ -383,7 +398,12 @@ impl FileIndex {
         out
     }
 
-    fn search_substring_case_sensitive(&self, query: &str, limit: usize) -> Vec<SearchResult> {
+    fn search_substring_case_sensitive(
+        &self,
+        query: &str,
+        limit: usize,
+        full_path: bool,
+    ) -> Vec<SearchResult> {
         let needle = query.as_bytes();
         let guard = self.inner.read();
         let mut out = Vec::new();
@@ -396,7 +416,9 @@ impl FileIndex {
             let path = decode_slice(&guard.arena, meta.path);
             let path_bytes = path.as_bytes();
             let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
-            if !contains_subslice(path_bytes, needle) && !contains_subslice(file_name, needle) {
+            if !contains_subslice(file_name, needle)
+                && (full_path && !contains_subslice(path_bytes, needle))
+            {
                 continue;
             }
 
@@ -409,12 +431,19 @@ impl FileIndex {
         out
     }
 
-    fn search_substring(&self, normalized: &str, limit: usize) -> Vec<SearchResult> {
+    fn search_substring(
+        &self,
+        normalized: &str,
+        limit: usize,
+        full_path: bool,
+    ) -> Vec<SearchResult> {
         let needle = normalized.as_bytes();
         let needle_len = needle.len();
         let guard = self.inner.read();
         let mut out = Vec::new();
-        let prefix_budget = if needle_len <= 1 {
+        let prefix_budget = if full_path {
+            0
+        } else if needle_len <= 1 {
             limit.saturating_mul(200)
         } else if needle_len == 2 {
             limit.saturating_mul(80)
@@ -423,96 +452,10 @@ impl FileIndex {
         };
 
         let mut seen = std::collections::HashSet::<u32>::new();
-        let prefix_ids = guard
-            .trie
-            .search_prefix(needle, guard.files.len().min(prefix_budget));
-
-        for id in prefix_ids {
-            if !seen.insert(id) {
-                continue;
-            }
-
-            let Some(meta) = guard.files.get(id as usize).copied() else {
-                continue;
-            };
-            let lower = guard.arena.get(meta.lower_path);
-            if !contains_subslice(lower, needle) {
-                continue;
-            }
-
-            let path = decode_slice(&guard.arena, meta.path);
-            out.push(SearchResult {
-                kind: classify_path_kind(&path).to_string(),
-                path,
-            });
-            if out.len() >= limit {
-                return out;
-            }
-        }
-
-        if needle_len <= 2 {
-            return out;
-        }
-
-        let gram_keys = collect_trigram_keys(needle);
-        if !gram_keys.is_empty() {
-            let mut postings = gram_keys
-                .iter()
-                .filter_map(|key| guard.trigrams.get(key))
-                .collect::<Vec<_>>();
-
-            if postings.len() == gram_keys.len() {
-                postings.sort_by_key(|list| list.len());
-                if let Some(anchor) = postings.first() {
-                    let needed = postings.len() as u16;
-                    let mut counts = HashMap::<u32, u16>::with_capacity(anchor.len());
-                    for &id in anchor.iter() {
-                        counts.insert(id, 1);
-                    }
-
-                    for list in postings.iter().skip(1) {
-                        for &id in list.iter() {
-                            if let Some(count) = counts.get_mut(&id) {
-                                *count += 1;
-                            }
-                        }
-                    }
-
-                    for &id in anchor.iter().rev() {
-                        if out.len() >= limit {
-                            break;
-                        }
-                        if !seen.insert(id) {
-                            continue;
-                        }
-                        if counts.get(&id).copied().unwrap_or_default() != needed {
-                            continue;
-                        }
-
-                        let Some(meta) = guard.files.get(id as usize).copied() else {
-                            continue;
-                        };
-                        let lower = guard.arena.get(meta.lower_path);
-                        if !contains_subslice(lower, needle) {
-                            continue;
-                        }
-
-                        let path = decode_slice(&guard.arena, meta.path);
-                        out.push(SearchResult {
-                            kind: classify_path_kind(&path).to_string(),
-                            path,
-                        });
-                    }
-                }
-            }
-        }
-
-        let path_like_query = needle.iter().any(|ch| matches!(*ch, b'\\' | b'/' | b':'));
-        if out.len() < limit && path_like_query {
-            for (idx, meta) in guard.files.iter().enumerate() {
-                let id = idx as u32;
-                if !seen.insert(id) {
-                    continue;
+        if full_path {
+            for meta in guard.files.iter().rev() {
+                if out.len() >= limit {
+                    break;
                 }
 
                 let lower = guard.arena.get(meta.lower_path);
@@ -525,8 +468,91 @@ impl FileIndex {
                     kind: classify_path_kind(&path).to_string(),
                     path,
                 });
+            }
+        } else {
+            let prefix_ids = guard
+                .trie
+                .search_prefix(needle, guard.files.len().min(prefix_budget));
+
+            for id in prefix_ids {
+                if !seen.insert(id) {
+                    continue;
+                }
+
+                let Some(meta) = guard.files.get(id as usize).copied() else {
+                    continue;
+                };
+                let lower = guard.arena.get(meta.lower_path);
+                let file_name = basename_bytes(lower).unwrap_or(lower);
+                if !contains_subslice(file_name, needle) {
+                    continue;
+                }
+
+                let path = decode_slice(&guard.arena, meta.path);
+                out.push(SearchResult {
+                    kind: classify_path_kind(&path).to_string(),
+                    path,
+                });
                 if out.len() >= limit {
-                    break;
+                    return out;
+                }
+            }
+
+            if needle_len <= 2 {
+                return out;
+            }
+
+            let gram_keys = collect_trigram_keys(needle);
+            if !gram_keys.is_empty() {
+                let mut postings = gram_keys
+                    .iter()
+                    .filter_map(|key| guard.trigrams.get(key))
+                    .collect::<Vec<_>>();
+
+                if postings.len() == gram_keys.len() {
+                    postings.sort_by_key(|list| list.len());
+                    if let Some(anchor) = postings.first() {
+                        let needed = postings.len() as u16;
+                        let mut counts = HashMap::<u32, u16>::with_capacity(anchor.len());
+                        for &id in anchor.iter() {
+                            counts.insert(id, 1);
+                        }
+
+                        for list in postings.iter().skip(1) {
+                            for &id in list.iter() {
+                                if let Some(count) = counts.get_mut(&id) {
+                                    *count += 1;
+                                }
+                            }
+                        }
+
+                        for &id in anchor.iter().rev() {
+                            if out.len() >= limit {
+                                break;
+                            }
+                            if !seen.insert(id) {
+                                continue;
+                            }
+                            if counts.get(&id).copied().unwrap_or_default() != needed {
+                                continue;
+                            }
+
+                            let Some(meta) = guard.files.get(id as usize).copied() else {
+                                continue;
+                            };
+                            let lower = guard.arena.get(meta.lower_path);
+                            let file_name = basename_bytes(lower).unwrap_or(lower);
+                            if !contains_subslice(file_name, needle) {
+                                continue;
+                            }
+
+                            let path = decode_slice(&guard.arena, meta.path);
+                            out.push(SearchResult {
+                                kind: classify_path_kind(&path).to_string(),
+                                path,
+                            });
+                        }
+                    }
                 }
             }
         }

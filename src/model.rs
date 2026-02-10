@@ -7,6 +7,7 @@ use once_cell::sync::Lazy;
 
 const REGEX_QUERY_PREFIX: &str = "\u{1f}re\u{1f}";
 const CASE_SENSITIVE_QUERY_PREFIX: &str = "\u{1f}cs\u{1f}";
+const FULL_PATH_QUERY_PREFIX: &str = "\u{1f}fp\u{1f}";
 
 const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "msi", "bat", "cmd", "com", "ps1", "vbs", "scr"];
 const ARCHIVE_EXTENSIONS: &[&str] = &[
@@ -86,10 +87,14 @@ pub fn encode_search_query_payload(
     query: &str,
     mode: SearchQueryMode,
     case_sensitive: bool,
+    full_path: bool,
 ) -> String {
     let mut payload = String::new();
     if case_sensitive {
         payload.push_str(CASE_SENSITIVE_QUERY_PREFIX);
+    }
+    if full_path {
+        payload.push_str(FULL_PATH_QUERY_PREFIX);
     }
     if mode == SearchQueryMode::Regex {
         payload.push_str(REGEX_QUERY_PREFIX);
@@ -98,14 +103,20 @@ pub fn encode_search_query_payload(
     payload
 }
 
-pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, bool, &str) {
+pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, bool, bool, &str) {
     let mut mode = SearchQueryMode::Wildcard;
     let mut case_sensitive = false;
+    let mut full_path = false;
     let mut query = payload;
 
     loop {
         if let Some(stripped) = query.strip_prefix(CASE_SENSITIVE_QUERY_PREFIX) {
             case_sensitive = true;
+            query = stripped;
+            continue;
+        }
+        if let Some(stripped) = query.strip_prefix(FULL_PATH_QUERY_PREFIX) {
+            full_path = true;
             query = stripped;
             continue;
         }
@@ -117,7 +128,7 @@ pub fn decode_search_query_payload(payload: &str) -> (SearchQueryMode, bool, &st
         break;
     }
 
-    (mode, case_sensitive, query)
+    (mode, case_sensitive, full_path, query)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

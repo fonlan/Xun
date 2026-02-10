@@ -97,15 +97,20 @@ fn main() -> anyhow::Result<()> {
     }
 
     xlog::info("startup mode: client");
+    let mut startup_service_starting = false;
     match server::start_installed_service_if_stopped() {
         Ok(StartInstalledServiceOutcome::NotInstalled)
-        | Ok(StartInstalledServiceOutcome::AlreadyRunning)
-        | Ok(StartInstalledServiceOutcome::Started) => {}
+        | Ok(StartInstalledServiceOutcome::AlreadyRunning) => {}
+        Ok(StartInstalledServiceOutcome::Started) => {
+            startup_service_starting = true;
+        }
         Ok(StartInstalledServiceOutcome::RequiresElevation) => {
             match win::launch_start_service_elevated() {
-                Ok(RunAsLaunchOutcome::Started) => {}
+                Ok(RunAsLaunchOutcome::Started) => {
+                    startup_service_starting = true;
+                }
                 Ok(RunAsLaunchOutcome::Cancelled) => {
-                    xlog::warn("startup auto-start cancelled by user at UAC prompt")
+                    xlog::warn("用户取消提权启动");
                 }
                 Err(err) => {
                     xlog::warn(format!(
@@ -120,7 +125,7 @@ fn main() -> anyhow::Result<()> {
             ));
         }
     }
-    let app = XunApp::new()?;
+    let app = XunApp::new(startup_service_starting)?;
     xlog::info("client app constructed, entering run loop");
     let run_result = app.run();
 

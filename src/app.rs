@@ -36,6 +36,10 @@ const RESULT_ICON_MIN_SOURCE_SIZE_PX: u32 = 32;
 const RESULT_ROW_FILL_BATCH_SIZE: usize = 16;
 const RESULT_ROW_FILL_INITIAL_BATCH_SIZE: usize = 8;
 const RESULT_ROW_FILL_INTERVAL_MS: u64 = 12;
+const SEARCHING_ANIMATION_INTERVAL_MS: u64 = 20;
+const SEARCHING_ANIMATION_STEP: f32 = 0.03;
+const STARTUP_SERVICE_CONNECT_RETRY_TIMES: usize = 20;
+const STARTUP_SERVICE_CONNECT_RETRY_DELAY_MS: u64 = 250;
 const MAX_RESULT_ICON_CACHE: usize = 4096;
 const MAX_RESULT_META_CACHE: usize = 4096;
 const OPENED_ITEM_HISTORY_FILE_NAME: &str = "opened-items.v1";
@@ -223,10 +227,11 @@ pub struct XunApp {
     _bridge: ShellBridge,
     _outside_click_timer: Timer,
     _result_row_fill_timer: Timer,
+    _searching_indicator_timer: Timer,
 }
 
 impl XunApp {
-    pub fn new() -> Result<Self> {
+    pub fn new(startup_service_starting: bool) -> Result<Self> {
         let ui = AppWindow::new()?;
         let ipc_client = Arc::new(IpcClient::new());
         let query_seq = Arc::new(AtomicU64::new(0));
@@ -243,6 +248,31 @@ impl XunApp {
             Duration::from_millis(RESULT_ROW_FILL_INTERVAL_MS),
             move || {
                 let _ = fill_result_rows_batch(RESULT_ROW_FILL_BATCH_SIZE);
+            },
+        );
+
+        let weak_for_searching_animation = ui.as_weak();
+        let searching_indicator_timer = Timer::default();
+        searching_indicator_timer.start(
+            TimerMode::Repeated,
+            Duration::from_millis(SEARCHING_ANIMATION_INTERVAL_MS),
+            move || {
+                let Some(window) = weak_for_searching_animation.upgrade() else {
+                    return;
+                };
+
+                if !window.get_searching() {
+                    if window.get_searching_progress() != 0.0 {
+                        window.set_searching_progress(0.0);
+                    }
+                    return;
+                }
+
+                let mut next = window.get_searching_progress() + SEARCHING_ANIMATION_STEP;
+                if next >= 1.0 {
+                    next -= 1.0;
+                }
+                window.set_searching_progress(next);
             },
         );
 
@@ -345,6 +375,8 @@ impl XunApp {
                             return;
                         };
 
+                        stop_searching_indicator(&window);
+                        window.set_service_starting(false);
                         window.set_service_unavailable(service_unavailable);
                         window.set_initial_index_ready(initial_index_ready);
 
@@ -391,6 +423,7 @@ impl XunApp {
             };
 
             if query_text.trim().is_empty() {
+                stop_searching_indicator(&window);
                 window.set_results(ModelRc::new(VecModel::default()));
                 window.set_selected_index(-1);
                 window.set_total_match_count(0);
@@ -439,8 +472,10 @@ impl XunApp {
                 query_text
             ));
 
+            start_searching_indicator(&window);
             if query_tx_for_ui.send(dispatch).is_err() {
                 xlog::error("query dispatch failed: worker channel closed");
+                stop_searching_indicator(&window);
                 *last_dispatched_query_for_ui.lock() = None;
             }
         });
@@ -467,6 +502,7 @@ impl XunApp {
             ));
 
             if query_text.trim().is_empty() {
+                stop_searching_indicator(&window);
                 *last_dispatched_query_for_mode_toggle.lock() = None;
                 return;
             }
@@ -494,8 +530,10 @@ impl XunApp {
                 query_text
             ));
 
+            start_searching_indicator(&window);
             if query_tx_for_mode_toggle.send(dispatch).is_err() {
                 xlog::error("query redispatch by mode toggle failed: worker channel closed");
+                stop_searching_indicator(&window);
                 *last_dispatched_query_for_mode_toggle.lock() = None;
             }
         });
@@ -827,6 +865,7 @@ impl XunApp {
                 if let Some(window) = weak.upgrade() {
                     xlog::info("activate callback invoked");
                     window.set_query("".into());
+                    stop_searching_indicator(&window);
                     window.set_regex_mode(false);
                     window.set_results(ModelRc::new(VecModel::default()));
                     window.set_selected_index(-1);
@@ -841,6 +880,7 @@ impl XunApp {
                     let previous_initial_index_ready = window.get_initial_index_ready();
                     match ipc_client_for_activate.check_initial_index_ready_quick() {
                         Ok(initial_index_ready) => {
+                            window.set_service_starting(false);
                             window.set_service_unavailable(false);
                             window.set_initial_index_ready(initial_index_ready);
                             xlog::info(format!(
@@ -849,6 +889,7 @@ impl XunApp {
                         }
                         Err(err) => {
                             let service_unavailable = is_service_unavailable_error(&err);
+                            window.set_service_starting(false);
                             window.set_service_unavailable(service_unavailable);
                             if service_unavailable {
                                 window.set_initial_index_ready(false);
@@ -879,31 +920,86 @@ impl XunApp {
         let bridge = ShellBridge::start(activate, exit)?;
 
         ui.set_results(ModelRc::new(VecModel::default()));
+        ui.set_searching(false);
+        ui.set_searching_progress(0.0);
         ui.set_selected_filter_index(0);
         ui.set_total_match_count(0);
-        match ipc_client.check_initial_index_ready_quick() {
-            Ok(initial_index_ready) => {
-                ui.set_service_unavailable(false);
-                ui.set_initial_index_ready(initial_index_ready);
-            }
-            Err(err) => {
-                let service_unavailable = is_service_unavailable_error(&err);
-                ui.set_service_unavailable(service_unavailable);
-                ui.set_initial_index_ready(false);
-                xlog::warn(format!(
-                    "startup status refresh failed service_unavailable={service_unavailable}: {err:#}"
-                ));
+        if startup_service_starting {
+            ui.set_service_starting(true);
+            ui.set_service_unavailable(false);
+            ui.set_initial_index_ready(false);
+        } else {
+            match ipc_client.check_initial_index_ready_quick() {
+                Ok(initial_index_ready) => {
+                    ui.set_service_starting(false);
+                    ui.set_service_unavailable(false);
+                    ui.set_initial_index_ready(initial_index_ready);
+                }
+                Err(err) => {
+                    let service_unavailable = is_service_unavailable_error(&err);
+                    ui.set_service_starting(false);
+                    ui.set_service_unavailable(service_unavailable);
+                    ui.set_initial_index_ready(false);
+                    xlog::warn(format!(
+                        "startup status refresh failed service_unavailable={service_unavailable}: {err:#}"
+                    ));
+                }
             }
         }
         center_popup_window(&ui);
         ui.show()?;
         show_and_focus_launcher_window(&ui);
 
+        if startup_service_starting {
+            let weak_for_startup_probe = ui.as_weak();
+            let ipc_client_for_startup_probe = ipc_client.clone();
+            thread::Builder::new()
+                .name("xun-startup-status-probe".to_string())
+                .spawn(move || {
+                    let (service_unavailable, initial_index_ready, delayed_err) =
+                        match check_initial_index_ready_with_retry(
+                            ipc_client_for_startup_probe.as_ref(),
+                        ) {
+                            Ok(initial_index_ready) => {
+                                (false, Some(initial_index_ready), None::<String>)
+                            }
+                            Err(err) => {
+                                let service_unavailable = is_service_unavailable_error(&err);
+                                (service_unavailable, None, Some(format!("{err:#}")))
+                            }
+                        };
+
+                    let _ = slint::invoke_from_event_loop(move || {
+                        let Some(window) = weak_for_startup_probe.upgrade() else {
+                            return;
+                        };
+
+                        window.set_service_starting(false);
+                        window.set_service_unavailable(service_unavailable);
+
+                        if let Some(initial_index_ready) = initial_index_ready {
+                            window.set_initial_index_ready(initial_index_ready);
+                        } else {
+                            window.set_initial_index_ready(false);
+                        }
+
+                        if let Some(err) = delayed_err {
+                            xlog::warn(format!(
+                                "startup delayed status refresh failed service_unavailable={}: {err}",
+                                service_unavailable
+                            ));
+                        }
+                    });
+                })
+                .context("spawn startup status probe thread failed")?;
+        }
+
         Ok(Self {
             _ui: ui,
             _bridge: bridge,
             _outside_click_timer: outside_click_timer,
             _result_row_fill_timer: result_row_fill_timer,
+            _searching_indicator_timer: searching_indicator_timer,
         })
     }
 
@@ -911,6 +1007,37 @@ impl XunApp {
         slint::run_event_loop_until_quit()?;
         Ok(())
     }
+}
+
+fn check_initial_index_ready_with_retry(ipc_client: &IpcClient) -> Result<bool> {
+    let mut last_error: Option<anyhow::Error> = None;
+
+    for attempt in 1..=STARTUP_SERVICE_CONNECT_RETRY_TIMES {
+        match ipc_client.check_initial_index_ready_quick() {
+            Ok(initial_index_ready) => {
+                xlog::info(format!(
+                    "startup status probe connected after retry attempt={attempt}/{STARTUP_SERVICE_CONNECT_RETRY_TIMES}"
+                ));
+                return Ok(initial_index_ready);
+            }
+            Err(err) => {
+                let service_unavailable = is_service_unavailable_error(&err);
+                xlog::warn(format!(
+                    "startup status probe failed attempt={attempt}/{STARTUP_SERVICE_CONNECT_RETRY_TIMES} service_unavailable={service_unavailable}: {err:#}"
+                ));
+
+                if attempt < STARTUP_SERVICE_CONNECT_RETRY_TIMES {
+                    thread::sleep(Duration::from_millis(
+                        STARTUP_SERVICE_CONNECT_RETRY_DELAY_MS,
+                    ));
+                }
+                last_error = Some(err);
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| anyhow::anyhow!("startup status probe failed without details")))
 }
 
 fn apply_results_for_filter(
@@ -1255,4 +1382,19 @@ fn query_debounce_duration(query: &str) -> Duration {
         _ => QUERY_DEBOUNCE_LONG_QUERY_MS,
     };
     Duration::from_millis(millis)
+}
+
+fn start_searching_indicator(window: &AppWindow) {
+    window.set_searching(true);
+    let progress = window.get_searching_progress();
+    if !(0.0..1.0).contains(&progress) {
+        window.set_searching_progress(0.0);
+    }
+}
+
+fn stop_searching_indicator(window: &AppWindow) {
+    window.set_searching(false);
+    if window.get_searching_progress() != 0.0 {
+        window.set_searching_progress(0.0);
+    }
 }

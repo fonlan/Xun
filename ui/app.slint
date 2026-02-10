@@ -49,6 +49,9 @@ export component AppWindow inherits Window {
     in-out property <bool> regex-mode: false;
     in-out property <bool> initial-index-ready: false;
     in-out property <bool> service-unavailable: false;
+    in-out property <bool> service-starting: false;
+    in-out property <bool> searching: false;
+    in-out property <float> searching-progress: 0.0;
     in-out property <length> results-viewport-y: 0px;
     in-out property <length> filter-viewport-x: 0px;
     out property <length> results-visible-height: root.results-panel-height - 8px - root.filter-bar-height;
@@ -131,14 +134,35 @@ export component AppWindow inherits Window {
                     background: @linear-gradient(180deg, #2A385244 0%, #1A263B5C 100%);
                 }
 
+                Rectangle {
+                    private property <length> indicator-width: 140px;
+                    x: (parent.width + self.indicator-width) * root.searching-progress - self.indicator-width;
+                    y: parent.height - 3px;
+                    width: self.indicator-width;
+                    height: 2px;
+                    border-radius: 1px;
+                    opacity: root.searching ? 1 : 0;
+                    background: @linear-gradient(90deg, #00000000 0%, #7FA6E7CC 44%, #CFE4FFFF 50%, #7FA6E7CC 56%, #00000000 100%);
+                    animate x {
+                        duration: 80ms;
+                        easing: linear;
+                    }
+                    animate opacity {
+                        duration: 140ms;
+                        easing: ease-in-out;
+                    }
+                }
+
                 Text {
                     x: root.query-padding-left;
                     width: max(0px, parent.width - root.query-padding-left - root.query-right-reserved);
                     height: parent.height;
                     text: (query_input.text == "" && query_input.preedit-text == "")
-                        ? (root.service-unavailable
-                            ? "服务端未启动"
-                            : (root.initial-index-ready ? "输入命令或文件名..." : "后台正在建立索引，输入后将逐步返回结果..."))
+                        ? (root.service-starting
+                            ? "服务端启动中，请稍后..."
+                            : (root.service-unavailable
+                                ? "服务端未启动"
+                                : (root.initial-index-ready ? "输入命令或文件名..." : "后台正在建立索引，输入后将逐步返回结果...")))
                         : "";
                     font-family: "Microsoft YaHei UI";
                     font-size: 22px;

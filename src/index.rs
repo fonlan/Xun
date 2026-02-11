@@ -346,7 +346,7 @@ impl FileIndex {
             if case_sensitive {
                 let path = decode_slice(&guard.arena, meta.path);
                 let file_name = basename(path.as_str()).unwrap_or(path.as_str());
-                if !regex.is_match(file_name) && (full_path && !regex.is_match(path.as_str())) {
+                if !regex.is_match(file_name) && (!full_path || !regex.is_match(path.as_str())) {
                     continue;
                 }
 
@@ -357,7 +357,7 @@ impl FileIndex {
             } else {
                 let path = std::str::from_utf8(guard.arena.get(meta.path)).unwrap_or_default();
                 let file_name = basename(path).unwrap_or(path);
-                if !regex.is_match(file_name) && (full_path && !regex.is_match(path)) {
+                if !regex.is_match(file_name) && (!full_path || !regex.is_match(path)) {
                     continue;
                 }
 
@@ -390,7 +390,7 @@ impl FileIndex {
             let path_bytes = path.as_bytes();
             let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
             if !wildcard_is_match(pattern_bytes, file_name)
-                && (full_path && !wildcard_is_match(pattern_bytes, path_bytes))
+                && (!full_path || !wildcard_is_match(pattern_bytes, path_bytes))
             {
                 continue;
             }
@@ -422,7 +422,7 @@ impl FileIndex {
             let path = guard.arena.get(meta.path);
             let file_name = basename_bytes(path).unwrap_or(path);
             if !wildcard_is_match_case_insensitive(pattern_bytes, file_name)
-                && (full_path && !wildcard_is_match_case_insensitive(pattern_bytes, path))
+                && (!full_path || !wildcard_is_match_case_insensitive(pattern_bytes, path))
             {
                 continue;
             }
@@ -456,7 +456,7 @@ impl FileIndex {
             let path_bytes = path.as_bytes();
             let file_name = basename_bytes(path_bytes).unwrap_or(path_bytes);
             if !contains_subslice(file_name, needle)
-                && (full_path && !contains_subslice(path_bytes, needle))
+                && (!full_path || !contains_subslice(path_bytes, needle))
             {
                 continue;
             }

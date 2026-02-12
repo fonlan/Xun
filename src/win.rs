@@ -662,7 +662,7 @@ fn set_clipboard_data_from_bytes(format: u32, payload: &[u8]) -> Result<()> {
 
 fn client_autostart_command() -> Result<String> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    Ok(format!("\"{}\"", exe.to_string_lossy()))
+    Ok(format!("\"{}\" --client-autostart", exe.to_string_lossy()))
 }
 
 fn open_run_key(sam_desired: REG_SAM_FLAGS) -> Result<OwnedRegKey> {
@@ -1312,3 +1312,4 @@ fn utf16_to_string(buf: &[u16]) -> String {
 fn loword(value: u32) -> u16 {
     (value & 0xFFFF) as u16
 }
+

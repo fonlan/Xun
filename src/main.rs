@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
     let mut start_service_mode = false;
     let mut stop_service_mode = false;
     let mut server_mode = false;
+    let mut client_autostart_mode = false;
 
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
@@ -49,6 +50,7 @@ fn main() -> anyhow::Result<()> {
             "--start-service" => start_service_mode = true,
             "--stop-service" => stop_service_mode = true,
             "--server" => server_mode = true,
+            "--client-autostart" => client_autostart_mode = true,
             _ => {}
         }
     }
@@ -101,7 +103,7 @@ fn main() -> anyhow::Result<()> {
         return server::run_server_mode();
     }
 
-    xlog::info("startup mode: client");
+    xlog::info(format!("startup mode: client, autostart_hidden={client_autostart_mode}"));
     let mut startup_service_starting = false;
     match server::start_installed_service_if_stopped() {
         Ok(StartInstalledServiceOutcome::NotInstalled)
@@ -130,7 +132,7 @@ fn main() -> anyhow::Result<()> {
             ));
         }
     }
-    let app = XunApp::new(startup_service_starting)?;
+    let app = XunApp::new(startup_service_starting, client_autostart_mode)?;
     xlog::info("client app constructed, entering run loop");
     let run_result = app.run();
 
@@ -160,3 +162,4 @@ fn main() -> anyhow::Result<()> {
 
     run_result
 }
+

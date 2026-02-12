@@ -233,7 +233,7 @@ pub struct XunApp {
 }
 
 impl XunApp {
-    pub fn new(startup_service_starting: bool) -> Result<Self> {
+    pub fn new(startup_service_starting: bool, start_hidden: bool) -> Result<Self> {
         let ui = AppWindow::new()?;
         let ipc_client = Arc::new(IpcClient::new());
         let query_seq = Arc::new(AtomicU64::new(0));
@@ -1126,8 +1126,10 @@ impl XunApp {
             }
         }
         center_popup_window(&ui);
-        ui.show()?;
-        show_and_focus_launcher_window(&ui);
+        if !start_hidden {
+            ui.show()?;
+            show_and_focus_launcher_window(&ui);
+        }
 
         if startup_service_starting {
             let weak_for_startup_probe = ui.as_weak();
@@ -1598,3 +1600,4 @@ fn stop_searching_indicator(window: &AppWindow) {
         window.set_searching_progress(0.0);
     }
 }
+
